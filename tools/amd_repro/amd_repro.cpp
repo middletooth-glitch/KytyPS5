@@ -211,6 +211,8 @@ constexpr const char* kOpNames[] = {"barrier2", "copy-buffer-to-image", "clear",
 
 // Specialization constants 0 and 1 (the tiler's ELEMENT_BYTES and TILE), when set.
 bool     g_specialize = false;
+// Set in reduce mode: the crash comes from vkCreateComputePipelines itself, no need to wait.
+const bool g_fast = std::getenv("AMD_REPRO_FAST") != nullptr;
 uint32_t g_spec_values[2] {};
 
 int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format = -1,
@@ -467,7 +469,7 @@ int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format =
 	Step("creating shader module");
 	if (auto r = vkCreateShaderModule(device, &module_info, nullptr, &module); r != VK_SUCCESS)
 		Fail("vkCreateShaderModule", r);
-	Sleep(1500); // a driver thread that crashes on the module does so here
+	if (!g_fast) Sleep(1500); // a driver thread that crashes on the module does so here
 
 	uint32_t max_set = 0;
 	for (const auto& b: shader.bindings) max_set = b.set > max_set ? b.set : max_set;
@@ -543,6 +545,7 @@ int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format =
 		racer.join();
 	}
 	if (pipeline_result != VK_SUCCESS) Fail("vkCreateComputePipelines", pipeline_result);
+	if (g_fast) return 0;
 	if ((bits & kCacheData) && cache != VK_NULL_HANDLE) {
 		Step("reading the pipeline cache");
 		read_cache();
@@ -823,6 +826,190 @@ int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format =
 	return 0;
 }
 
+
+// ---- Automatic reduction (--reduce <shader.spv>) ----
+// Replaces value-producing instructions with OpCopyObject of an OpConstantNull, in ever smaller
+// chunks, keeping every replacement after which the driver still crashes. Each variant stays
+// valid SPIR-V: only results of scalar, vector, matrix, array and struct types are replaced.
+
+using Instruction = std::vector<uint32_t>;
+
+struct Module {
+	std::vector<uint32_t>    header;
+	std::vector<Instruction> instructions;
+};
+
+Module SplitSpirv(const std::vector<uint32_t>& words) {
+	Module module;
+	module.header.assign(words.begin(), words.begin() + 5);
+	for (size_t i = 5; i < words.size();) {
+		const uint32_t count = words[i] >> 16;
+		if (count == 0 || i + count > words.size()) break;
+		module.instructions.emplace_back(words.begin() + i, words.begin() + i + count);
+		i += count;
+	}
+	return module;
+}
+
+bool IsValueOpcode(uint32_t op) {
+	return op == 12 || op == 57 || op == 61 || (op >= 79 && op <= 84) || (op >= 87 && op <= 107) ||
+	       (op >= 109 && op <= 152) || (op >= 154 && op <= 205) || (op >= 333 && op <= 366);
+}
+
+struct Reducer {
+	Module                    module;
+	std::vector<size_t>       candidates; // instruction indices that may be replaced
+	std::map<uint32_t, bool>  nullable;   // type id -> OpConstantNull allowed
+	size_t                    first_function = 0;
+	std::filesystem::path     work;
+	std::string               self;
+	uint32_t                  tests = 0;
+
+	void Analyze() {
+		std::map<uint32_t, Instruction> types;
+		bool in_function = false;
+		for (size_t i = 0; i < module.instructions.size(); i++) {
+			const auto& in = module.instructions[i];
+			const uint32_t op = in[0] & 0xffffu;
+			if (op >= 19 && op <= 39 && in.size() >= 2) types[in[1]] = in;
+			if (op == 54) {
+				if (first_function == 0) first_function = i;
+				in_function = true;
+			}
+			if (op == 56) in_function = false;
+			if (in_function && op != 54 && in.size() >= 3 && IsValueOpcode(op) && IsNullable(types, in[1]))
+				candidates.push_back(i);
+		}
+	}
+
+	bool IsNullable(std::map<uint32_t, Instruction>& types, uint32_t type) {
+		if (auto it = nullable.find(type); it != nullable.end()) return it->second;
+		bool result = false;
+		if (auto it = types.find(type); it != types.end()) {
+			const auto& t  = it->second;
+			const auto  op = t[0] & 0xffffu;
+			if (op == 20 || op == 21 || op == 22) result = true;
+			else if (op == 23 || op == 24 || op == 28) result = IsNullable(types, t[2]);
+			else if (op == 30) {
+				result = true;
+				for (size_t m = 2; m < t.size(); m++) result = result && IsNullable(types, t[m]);
+			}
+		}
+		nullable[type] = result;
+		return result;
+	}
+
+	std::vector<uint32_t> Build(const std::vector<bool>& replaced) const {
+		std::map<uint32_t, uint32_t> nulls;
+		uint32_t bound = module.header[3];
+		std::vector<Instruction> body = module.instructions;
+		for (size_t c = 0; c < candidates.size(); c++) {
+			if (!replaced[c]) continue;
+			auto& in = body[candidates[c]];
+			const uint32_t type = in[1], result = in[2];
+			auto [it, inserted] = nulls.try_emplace(type, bound);
+			if (inserted) bound++;
+			in = {(4u << 16) | 83u, type, result, it->second};
+		}
+		std::vector<uint32_t> words = module.header;
+		words[3] = bound;
+		for (size_t i = 0; i < body.size(); i++) {
+			if (i == first_function)
+				for (const auto& [type, id]: nulls) words.insert(words.end(), {(3u << 16) | 46u, type, id});
+			words.insert(words.end(), body[i].begin(), body[i].end());
+		}
+		return words;
+	}
+
+	bool Crashes(const std::vector<bool>& replaced, const char* save_as = nullptr) {
+		const auto words = Build(replaced);
+		const auto path  = work / (save_as != nullptr ? save_as : "candidate.spv");
+		{
+			std::ofstream out(path, std::ios::binary);
+			out.write(reinterpret_cast<const char*>(words.data()), static_cast<std::streamsize>(words.size() * 4));
+		}
+		std::string command = "\"" + self + "\" --child \"" + path.string() + "\" " +
+		                      std::to_string(kFeatures | kPushDesc) + " -1 0 -1";
+		STARTUPINFOA startup {sizeof(startup)};
+		startup.dwFlags     = STARTF_USESTDHANDLES;
+		PROCESS_INFORMATION process {};
+		if (!CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+		                    nullptr, nullptr, &startup, &process))
+			return false;
+		DWORD code = 0;
+		if (WaitForSingleObject(process.hProcess, 60000) == WAIT_TIMEOUT) {
+			TerminateProcess(process.hProcess, STILL_ACTIVE);
+			code = STILL_ACTIVE;
+		} else {
+			GetExitCodeProcess(process.hProcess, &code);
+		}
+		CloseHandle(process.hProcess);
+		CloseHandle(process.hThread);
+		tests++;
+		return code == 0xC0000005;
+	}
+};
+
+int Reduce(const std::filesystem::path& spv) {
+	SetEnvironmentVariableA("AMD_REPRO_FAST", "1");
+	Reducer r;
+	r.module = SplitSpirv(ReadSpirv(spv));
+	r.work   = spv.parent_path();
+	char self[MAX_PATH];
+	GetModuleFileNameA(nullptr, self, MAX_PATH);
+	r.self = self;
+	r.Analyze();
+	std::ofstream log(r.work / "amd_repro_reduce_log.txt");
+	const auto report = [&](const std::string& line) {
+		std::printf("%s\n", line.c_str());
+		std::fflush(stdout);
+		log << line << "\n";
+		log.flush();
+	};
+	const size_t n = r.candidates.size();
+	report("reduce: " + spv.filename().string() + ", " + std::to_string(n) +
+	       " replaceable instructions of " + std::to_string(r.module.instructions.size()));
+	std::vector<bool> replaced(n, false);
+	if (!r.Crashes(replaced)) {
+		report("the original does not crash; nothing to reduce");
+		return 1;
+	}
+	std::vector<bool> all(n, true);
+	const bool all_crash = r.Crashes(all, "reduced_all_values.spv");
+	report(std::string("with every value replaced: ") + (all_crash ? "still crashes" : "no crash"));
+	if (all_crash) {
+		replaced = all;
+	} else {
+		for (size_t chunk = (n + 1) / 2; chunk >= 1; chunk = chunk == 1 ? 0 : (chunk + 1) / 2) {
+			std::vector<size_t> remaining;
+			for (size_t c = 0; c < n; c++)
+				if (!replaced[c]) remaining.push_back(c);
+			if (chunk > remaining.size()) chunk = remaining.size();
+			for (size_t start = 0; start < remaining.size(); start += chunk) {
+				auto trial = replaced;
+				for (size_t k = start; k < std::min(start + chunk, remaining.size()); k++)
+					trial[remaining[k]] = true;
+				if (r.Crashes(trial)) replaced = trial;
+			}
+			size_t left = 0;
+			for (bool b: replaced) left += b ? 0 : 1;
+			report("chunk " + std::to_string(chunk) + ": " + std::to_string(left) +
+			       " instructions still needed for the crash (" + std::to_string(r.tests) + " tests)");
+			if (r.tests > 1500) {
+				report("test budget reached");
+				break;
+			}
+		}
+	}
+	r.Crashes(replaced, "reduced.spv");
+	std::string kept;
+	for (size_t c = 0; c < n; c++)
+		if (!replaced[c]) kept += std::to_string(r.candidates[c]) + " ";
+	report("kept instruction indices: " + kept);
+	report("saved reduced.spv; done");
+	return 0;
+}
+
 std::string Describe(DWORD code) {
 	char text[64];
 	switch (code) {
@@ -851,6 +1038,7 @@ int main(int argc, char** argv) {
 		return RunChild(argv[2], static_cast<uint32_t>(std::strtoul(argv[3], nullptr, 10)),
 		                image_format, image_flags, op);
 	}
+	if (argc >= 3 && std::strcmp(argv[1], "--reduce") == 0) return Reduce(argv[2]);
 	// amd_repro.exe --dispatch <shader.spv>: runs the shader on real 3D images.
 	const bool ops      = argc >= 3 && std::strcmp(argv[1], "--ops") == 0;
 	const bool tiler    = argc >= 3 && std::strcmp(argv[1], "--tiler") == 0;
