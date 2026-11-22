@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -208,7 +209,12 @@ int RunChild(const std::filesystem::path& spv, uint32_t bits) {
 	INSTANCE_FN(vkCreateInstance);
 
 	VkApplicationInfo app {VK_STRUCTURE_TYPE_APPLICATION_INFO};
-	app.pApplicationName = "amd_repro";
+	// AMD_REPRO_NAME=Kyty gives the driver the application and engine names Kyty uses.
+	const char* name_override = std::getenv("AMD_REPRO_NAME");
+	app.pApplicationName = name_override != nullptr ? name_override : "amd_repro";
+	app.applicationVersion = 1;
+	app.pEngineName = name_override;
+	app.engineVersion = 1;
 	app.apiVersion       = VK_API_VERSION_1_3;
 	VkInstanceCreateInfo instance_info {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
 	instance_info.pApplicationInfo = &app;
