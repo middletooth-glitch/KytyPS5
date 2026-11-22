@@ -687,6 +687,41 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		}
 		std::fflush(stdout);
 	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// The faulting host thread and its call stack, each frame as module+offset; the emulator
+	// links at a fixed base (/DYNAMICBASE:NO), so its offsets match the build's link map.
+	{
+		PWSTR description = nullptr;
+		char  name[256]   = "(none)";
+		if (SUCCEEDED(GetThreadDescription(GetCurrentThread(), &description)) && description != nullptr) {
+			if (description[0] != L'\0') {
+				WideCharToMultiByte(CP_UTF8, 0, description, -1, name, sizeof(name), nullptr, nullptr);
+			}
+			LocalFree(description);
+		}
+		std::printf("--- Host thread ---\nid=%lu description=%s\n", GetCurrentThreadId(), name);
+		void*      frames[62] {};
+		const auto count = RtlCaptureStackBackTrace(0, 62, frames, nullptr);
+		std::printf("--- Host backtrace ---\n");
+		for (USHORT i = 0; i < count; i++) {
+			HMODULE module = nullptr;
+			char    path[MAX_PATH] = "?";
+			if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+			                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			                       static_cast<LPCSTR>(frames[i]), &module) != 0) {
+				GetModuleFileNameA(module, path, sizeof(path));
+			}
+			const char* base = path;
+			for (const char* c = path; *c != '\0'; c++) {
+				if (*c == '\\' || *c == '/') base = c + 1;
+			}
+			std::printf("  %2u 0x%016" PRIx64 " %s+0x%" PRIx64 "\n", static_cast<unsigned>(i),
+			            reinterpret_cast<uint64_t>(frames[i]), base,
+			            reinterpret_cast<uint64_t>(frames[i]) - reinterpret_cast<uint64_t>(module));
+		}
+		std::fflush(stdout);
+	}
+#endif
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64
 	     " access=%u address=0x%016" PRIx64 "\n",
 	     static_cast<unsigned>(info->type), info->native_code, info->exception_address,
