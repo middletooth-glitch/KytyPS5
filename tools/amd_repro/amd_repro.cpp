@@ -21,7 +21,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <atomic>
 #include <map>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -36,6 +38,8 @@ constexpr uint32_t kRobust2  = 1u << 4; // VK_EXT_robustness2 features
 constexpr uint32_t kAllExt   = 1u << 5; // Kyty's optional device extensions and their features
 constexpr uint32_t kReserve  = 1u << 6; // Kyty's guest address-space reservation (memory.cpp)
 constexpr uint32_t kReserveLow = 1u << 7; // the same, only below 4 GiB
+constexpr uint32_t kCacheData = 1u << 8;  // vkGetPipelineCacheData after the pipeline
+constexpr uint32_t kCacheRace  = 1u << 9;  // ... from a second thread while it is created
 constexpr uint32_t kLikeKyty = kFeatures | kSubgroup | kPushDesc | kCache | kRobust2;
 
 struct Variant {
@@ -45,10 +49,9 @@ struct Variant {
 // Every variant enables Kyty's device features: its shaders declare capabilities that need them.
 constexpr Variant kVariants[] = {
     {kLikeKyty, "like-kyty"},
-    {kLikeKyty | kAllExt, "like-kyty+extensions"},
-    {kLikeKyty | kReserve, "like-kyty+address-reserve"},
-    {kLikeKyty | kReserveLow, "like-kyty+reserve-below-4GiB"},
-    {kLikeKyty | kAllExt | kReserve, "like-kyty+ext+reserve"},
+    {kLikeKyty | kCacheData, "like-kyty+cache-data"},
+    {kLikeKyty | kCacheRace, "like-kyty+cache-data-thread"},
+    {kLikeKyty | kCacheData | kCacheRace | kAllExt | kReserve, "everything"},
 };
 
 // Reserves every free block over 16 MiB in Kyty's guest ranges, as ReserveGuestRegions does.
@@ -505,10 +508,35 @@ int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format =
 	if ((bits & kSubgroup) && s13.subgroupSizeControl) pipeline_info.stage.pNext = &subgroup;
 	pipeline_info.layout = pipeline_layout;
 	VkPipeline pipeline = VK_NULL_HANDLE;
+	DEVICE_FN(vkGetPipelineCacheData);
+	const auto read_cache = [&] {
+		size_t size = 0;
+		if (vkGetPipelineCacheData(device, cache, &size, nullptr) != VK_SUCCESS || size == 0) return;
+		std::vector<uint8_t> data(size);
+		vkGetPipelineCacheData(device, cache, &size, data.data());
+	};
+	// Kyty saves the cache on its store thread while the GPU thread goes on creating pipelines.
+	std::atomic<bool> racing {true};
+	std::thread       racer;
+	if ((bits & kCacheRace) && cache != VK_NULL_HANDLE) {
+		Step("reading the pipeline cache from a second thread");
+		racer = std::thread([&] {
+			while (racing.load()) read_cache();
+		});
+	}
 	Step("creating compute pipeline");
-	if (auto r = vkCreateComputePipelines(device, cache, 1, &pipeline_info, nullptr, &pipeline);
-	    r != VK_SUCCESS)
-		Fail("vkCreateComputePipelines", r);
+	const auto pipeline_result =
+	    vkCreateComputePipelines(device, cache, 1, &pipeline_info, nullptr, &pipeline);
+	if ((bits & kCacheRace) && racer.joinable()) {
+		Sleep(500);
+		racing.store(false);
+		racer.join();
+	}
+	if (pipeline_result != VK_SUCCESS) Fail("vkCreateComputePipelines", pipeline_result);
+	if ((bits & kCacheData) && cache != VK_NULL_HANDLE) {
+		Step("reading the pipeline cache");
+		read_cache();
+	}
 	Sleep(1500);
 	vkDeviceWaitIdle(device);
 	Step("pipeline created OK");
