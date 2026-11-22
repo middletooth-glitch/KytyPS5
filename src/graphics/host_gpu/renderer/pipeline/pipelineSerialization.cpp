@@ -81,7 +81,9 @@ template <class S, class Key> void IoKey(S& io, Key& key) {
 
 template <class S, class Module> void IoModule(S& io, Module& stage) {
 	// The handle comes from the SPIR-V; stored programs have no function code.
-	auto& [id, handle, info, specialization, function_code, rect_parameters, mesh_task] = stage;
+	// host_skipped is recomputed for the GPU at load time.
+	auto& [id, handle, info, specialization, function_code, rect_parameters, mesh_task,
+	       host_skipped] = stage;
 	IoAll(io, id, info, specialization, rect_parameters, mesh_task);
 }
 
@@ -180,8 +182,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	// A compute pipeline depends only on its module.
 	for (const auto* module: modules | std::views::values) {
 		if (module != nullptr && module->info.stage == ShaderType::Compute &&
-		    !IsSkippedComputeShader(module->info.shader_hash,
-		                            m_graphics.GetPhysicalDeviceProperties().vendorID)) {
+		    !module->host_skipped) {
 			jobs.emplace_back([this, module, &pipeline = m_compute_pipelines[module->id]] {
 				CreatePipelineInternal(m_graphics, pipeline, *module, m_driver_cache);
 			});
@@ -244,7 +245,11 @@ bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
 				m_program_cache.erase(program);
 				return false;
 			}
-			module.module = CompileSPV(spirv, m_graphics.device);
+			module.host_skipped =
+			    IsHostSkippedShader(module.info, m_graphics.GetPhysicalDeviceProperties().vendorID);
+			if (!module.host_skipped) {
+				module.module = CompileSPV(spirv, m_graphics.device);
+			}
 			program->second.modules.push_back(std::move(module));
 			break;
 		}

@@ -255,13 +255,21 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	const auto* stage = ShaderRecompiler::StageName(key.stage);
 	DumpShader(result.spirv, fmt::format("{}_{:016x}_{:016x}.spv", stage, key.hash, id));
 	ValidateShaderSpirv(stage, key.hash, result.spirv, profile.maintenance8);
+	const bool host_skipped =
+	    IsHostSkippedShader(info, m_graphics.GetPhysicalDeviceProperties().vendorID);
+	if (host_skipped) {
+		LOGF("CompileModule: not compiling %s shader hash=0x%016" PRIx64
+		     " for the host driver; its dispatches are dropped\n",
+		     stage, key.hash);
+	}
 	auto& module = program.modules.emplace_back(ShaderModule {
 	    .id             = id,
-	    .module         = CompileSPV(result.spirv, m_graphics.device),
+	    .module         = host_skipped ? vk::ShaderModule {} : CompileSPV(result.spirv, m_graphics.device),
 	    .info           = std::move(info),
 	    .specialization = program.specialization,
 	    .function_code  = {function_code.begin(), function_code.end()},
 	});
+	module.host_skipped = host_skipped;
 	m_compiled[static_cast<size_t>(key.stage)]++;
 	// Guest geometry shaders are compiled through the host mesh stage.
 	std::printf("Shaders: VS %u | PS %u | CS %u | GS %u | LS %u | HS %u | TES %u\n",
@@ -846,6 +854,31 @@ bool IsSkippedComputeShader(uint64_t hash, uint32_t vendor_id) {
 	return std::ranges::find(skipped, hash) != skipped.end();
 }
 
+// The AMD crashes so far are all compute shaders that write 3D storage images, and AMD's
+// driver starts compiling as soon as the shader module is created. On AMD GPUs such shaders are
+// therefore not handed to the driver at all; KYTY_AMD_3D_STORAGE_WRITES=keep turns this off.
+bool IsHostSkippedShader(const ShaderRecompiler::IR::CompiledShaderInfo& info, uint32_t vendor_id) {
+	if (info.stage != ShaderType::Compute) {
+		return false;
+	}
+	if (IsSkippedComputeShader(info.shader_hash, vendor_id)) {
+		return true;
+	}
+	static const bool keep = [] {
+		const char* value = std::getenv("KYTY_AMD_3D_STORAGE_WRITES");
+		return value != nullptr && std::strcmp(value, "keep") == 0;
+	}();
+	constexpr uint32_t AmdVendorId = 0x1002u;
+	if (keep || vendor_id != AmdVendorId) {
+		return false;
+	}
+	return std::ranges::any_of(info.info.images, [](const auto& image) {
+		return image.resource_class == ShaderRecompiler::IR::ImageResourceClass::Storage &&
+		       image.written &&
+		       image.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim3D;
+	});
+}
+
 const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs,
                                                      ShaderComputeInputInfo&      input_info) {
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
@@ -863,6 +896,15 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
 	ShaderRecompiler::IR::PushData::Window push_data;
 	const auto* module = GetProgram(params, input_info, push_data);
+	if (module != nullptr && module->host_skipped) {
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 32u) {
+			LOGF("GetComputeProgram: dropping dispatch of host-skipped compute shader "
+			     "hash=0x%016" PRIx64 "\n",
+			     params.hash);
+		}
+		return nullptr;
+	}
 	// HW_ID2 reads are translated with the graphics compute queue's values.
 	EXIT_NOT_IMPLEMENTED(module != nullptr && input_info.async_compute &&
 	                     module->info.info.reads_queue_id);
@@ -1069,6 +1111,7 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 
 	const auto& module = *input_info.stage.module;
 
+	EXIT_IF(module.host_skipped);
 	auto [iter, inserted] = m_compute_pipelines.try_emplace(module.id);
 	auto& pipeline        = iter->second;
 	if (!inserted) {

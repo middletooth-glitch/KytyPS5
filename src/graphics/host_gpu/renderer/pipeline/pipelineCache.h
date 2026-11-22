@@ -114,8 +114,10 @@ struct alignas(4) GraphicsPipelineKey {
 static_assert(std::has_unique_object_representations_v<GraphicsPipelineKey>);
 
 // A compiled stage with what pipeline creation needs from it besides the key.
-// Compute shaders whose dispatches are dropped (KYTY_SKIP_CS_HASHES; see pipelineCache.cpp).
+// Compute shaders whose dispatches are dropped and that never reach the driver
+// (KYTY_SKIP_CS_HASHES, KYTY_AMD_3D_STORAGE_WRITES; see pipelineCache.cpp).
 bool IsSkippedComputeShader(uint64_t hash, uint32_t vendor_id);
+bool IsHostSkippedShader(const ShaderRecompiler::IR::CompiledShaderInfo& info, uint32_t vendor_id);
 
 struct ShaderModule {
 	uint64_t                                     id     = 0;
@@ -127,6 +129,8 @@ struct ShaderModule {
 	std::vector<RectListParameter>               rect_parameters;
 	// Indirect mesh draw: a task shader reads the records and launches the groups.
 	bool                                         mesh_task = false;
+	// Not compiled for the host driver (IsHostSkippedShader): dispatches of it are dropped.
+	bool                                         host_skipped = false;
 };
 
 // A draw's depth target and its first color_count color targets.
