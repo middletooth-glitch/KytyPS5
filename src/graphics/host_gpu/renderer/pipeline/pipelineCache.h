@@ -114,6 +114,9 @@ struct alignas(4) GraphicsPipelineKey {
 static_assert(std::has_unique_object_representations_v<GraphicsPipelineKey>);
 
 // A compiled stage with what pipeline creation needs from it besides the key.
+// Compute shaders whose dispatches are dropped (KYTY_SKIP_CS_HASHES; see pipelineCache.cpp).
+bool IsSkippedComputeShader(uint64_t hash, uint32_t vendor_id);
+
 struct ShaderModule {
 	uint64_t                                     id     = 0;
 	vk::ShaderModule                             module = nullptr;

@@ -179,7 +179,9 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	}
 	// A compute pipeline depends only on its module.
 	for (const auto* module: modules | std::views::values) {
-		if (module != nullptr && module->info.stage == ShaderType::Compute) {
+		if (module != nullptr && module->info.stage == ShaderType::Compute &&
+		    !IsSkippedComputeShader(module->info.shader_hash,
+		                            m_graphics.GetPhysicalDeviceProperties().vendorID)) {
 			jobs.emplace_back([this, module, &pipeline = m_compute_pipelines[module->id]] {
 				CreatePipelineInternal(m_graphics, pipeline, *module, m_driver_cache);
 			});

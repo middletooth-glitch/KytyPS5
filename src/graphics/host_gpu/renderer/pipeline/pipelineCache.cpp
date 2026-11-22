@@ -28,6 +28,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <limits>
@@ -808,10 +809,56 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	}
 }
 
+// AMD's Vulkan driver (amdvlk64.dll, Adrenalin 26.10.1 and 26.11.2 on an RX 6800 XT) crashes on
+// one of its own threads while compiling the pipeline for some compute shaders; the SPIR-V passes
+// validation. Dispatches of the shaders listed in KYTY_SKIP_CS_HASHES (hex hashes separated by
+// commas or spaces) are dropped instead. Without the variable, the known Demon's Souls shader is
+// dropped on AMD GPUs only; KYTY_SKIP_CS_HASHES=none drops nothing.
+bool IsSkippedComputeShader(uint64_t hash, uint32_t vendor_id) {
+	static const std::vector<uint64_t> skipped = [vendor_id] {
+		std::vector<uint64_t> list;
+		const char* env = std::getenv("KYTY_SKIP_CS_HASHES");
+		if (env != nullptr && std::strcmp(env, "none") == 0) {
+			return list;
+		}
+		if (env == nullptr) {
+			constexpr uint32_t AmdVendorId = 0x1002u;
+			if (vendor_id == AmdVendorId) {
+				list.push_back(0xe2e002629079222fULL); // Demon's Souls (PPSA01341)
+			}
+			return list;
+		}
+		const char* cursor = env;
+		while (*cursor != '\0') {
+			char* end = nullptr;
+			const auto value = std::strtoull(cursor, &end, 16);
+			if (end == cursor) {
+				cursor++;
+				continue;
+			}
+			if (value != 0) {
+				list.push_back(value);
+			}
+			cursor = end;
+		}
+		return list;
+	}();
+	return std::ranges::find(skipped, hash) != skipped.end();
+}
+
 const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs,
                                                      ShaderComputeInputInfo&      input_info) {
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, input_info);
+	if (IsSkippedComputeShader(params.hash, m_graphics.GetPhysicalDeviceProperties().vendorID)) {
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 8u) {
+			LOGF("GetComputeProgram: skipping dispatch of compute shader hash=0x%016" PRIx64
+			     " (KYTY_SKIP_CS_HASHES)\n",
+			     params.hash);
+		}
+		return nullptr;
+	}
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
 	ShaderRecompiler::IR::PushData::Window push_data;
