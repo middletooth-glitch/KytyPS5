@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/trace3d.h"
 
 #include <algorithm>
 #include <optional>
@@ -331,7 +332,14 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		submit_info.signalSemaphoreCount = submit.num_signal_semaphores;
 		submit_info.pSignalSemaphores    = submit.signal_semaphores.data();
 
+		const bool trace = Trace3d::TraceSubmit();
+		if (trace) {
+			TRACE3D("submit begin tick=%" PRIu64 " waits=%u\n", tick, submit.num_wait_semaphores);
+		}
 		result = graphics.queue.submit(1, &submit_info, nullptr);
+		if (trace) {
+			TRACE3D("submit end tick=%" PRIu64 "\n", tick);
+		}
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::QueueSubmits);
 

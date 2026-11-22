@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "graphics/host_gpu/renderer/trace3d.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -714,10 +715,20 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 		     static_cast<vk::ImageCreateFlags::MaskType>(create.flags), info.samples);
 	}
 
+	if (info.IsVolume()) {
+		TRACE3D("3D image create begin extent=%ux%ux%u format=%d mips=%u usage=0x%x flags=0x%x\n",
+		        create.extent.width, create.extent.height, create.extent.depth,
+		        static_cast<int>(create.format), create.mipLevels,
+		        static_cast<vk::ImageUsageFlags::MaskType>(create.usage),
+		        static_cast<vk::ImageCreateFlags::MaskType>(create.flags));
+	}
 	if (!graphics.CreateImage(create, backing)) {
 		EXIT("failed to create image: extent=%ux%ux%u format=%d layers=%u levels=%u\n",
 		     create.extent.width, create.extent.height, create.extent.depth,
 		     static_cast<int>(create.format), create.arrayLayers, create.mipLevels);
+	}
+	if (info.IsVolume()) {
+		TRACE3D("3D image create end\n");
 	}
 	SetVulkanObjectNameF(
 	    graphics.device, backing.image,

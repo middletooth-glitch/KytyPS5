@@ -118,6 +118,7 @@ static_assert(std::has_unique_object_representations_v<GraphicsPipelineKey>);
 // (KYTY_SKIP_CS_HASHES, KYTY_AMD_3D_STORAGE_WRITES; see pipelineCache.cpp).
 bool IsSkippedComputeShader(uint64_t hash, uint32_t vendor_id);
 bool IsHostSkippedShader(const ShaderRecompiler::IR::CompiledShaderInfo& info, uint32_t vendor_id);
+bool UsesImage3D(const ShaderRecompiler::IR::CompiledShaderInfo& info);
 
 struct ShaderModule {
 	uint64_t                                     id     = 0;

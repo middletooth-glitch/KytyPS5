@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
+#include "graphics/host_gpu/renderer/trace3d.h"
 
 #include "common/assert.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -347,8 +348,20 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 	create.subresourceRange.baseArrayLayer = normalized.base_layer;
 	create.subresourceRange.layerCount     = normalized.layer_count;
 
+	const bool volume = image.image_type == vk::ImageType::e3D;
+	if (volume) {
+		TRACE3D("3D image view begin type=%d format=%d usage=0x%x mips=%u+%u layers=%u+%u "
+		        "min_lod=%u\n",
+		        static_cast<int>(normalized.type), static_cast<int>(normalized.format),
+		        static_cast<vk::ImageUsageFlags::MaskType>(usage.usage), normalized.base_level,
+		        normalized.level_count, normalized.base_layer, normalized.layer_count,
+		        normalized.min_lod);
+	}
 	vk::ImageView view   = nullptr;
 	const auto    result = m_graphics.device.createImageView(&create, nullptr, &view);
+	if (volume) {
+		TRACE3D("3D image view end\n");
+	}
 	if (result != vk::Result::eSuccess || view == nullptr) {
 		EXIT("failed to create image view: result=%d image_format=%d view_format=%d type=%d "
 		     "aspect=0x%x mip=%u+%u layer=%u+%u usage=0x%x\n",

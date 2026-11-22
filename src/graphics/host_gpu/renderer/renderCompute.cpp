@@ -1,4 +1,5 @@
 #include "common/assert.h"
+#include "graphics/host_gpu/renderer/trace3d.h"
 #include "common/common.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
@@ -392,8 +393,16 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	RebindBuffers(bindings);
 
 	const auto vk_buffer = buffer.Handle();
+	const bool uses_3d = UsesImage3D(program);
+	if (uses_3d) {
+		TRACE3D("dispatch bind hash=0x%016" PRIx64 " groups=%ux%ux%u\n", program.shader_hash,
+		        thread_group_x, thread_group_y, thread_group_z);
+	}
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
+	if (uses_3d) {
+		TRACE3D("dispatch bound hash=0x%016" PRIx64 "\n", program.shader_hash);
+	}
 	if (HasStorageWrites(input_info, bindings)) {
 		// A host fence used to serialize every dispatch. Preserve its read-before-write ordering
 		// while allowing the queue to execute asynchronously.

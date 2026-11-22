@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/trace3d.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
@@ -262,6 +263,12 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 		     " for the host driver; its dispatches are dropped\n",
 		     stage, key.hash);
 	}
+	const bool uses_3d = UsesImage3D(info);
+	if (uses_3d) {
+		Trace3d::g_seen.store(true, std::memory_order_relaxed);
+		TRACE3D("%s shader module hash=0x%016" PRIx64 " begin (skipped=%d)\n", stage, key.hash,
+		        host_skipped ? 1 : 0);
+	}
 	auto& module = program.modules.emplace_back(ShaderModule {
 	    .id             = id,
 	    .module         = host_skipped ? vk::ShaderModule {} : CompileSPV(result.spirv, m_graphics.device),
@@ -270,6 +277,9 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	    .function_code  = {function_code.begin(), function_code.end()},
 	});
 	module.host_skipped = host_skipped;
+	if (uses_3d) {
+		TRACE3D("%s shader module hash=0x%016" PRIx64 " end\n", stage, key.hash);
+	}
 	m_compiled[static_cast<size_t>(key.stage)]++;
 	// Guest geometry shaders are compiled through the host mesh stage.
 	std::printf("Shaders: VS %u | PS %u | CS %u | GS %u | LS %u | HS %u | TES %u\n",
@@ -873,6 +883,10 @@ bool IsHostSkippedShader(const ShaderRecompiler::IR::CompiledShaderInfo& info, u
 	if (keep || vendor_id != AmdVendorId) {
 		return false;
 	}
+	return UsesImage3D(info);
+}
+
+bool UsesImage3D(const ShaderRecompiler::IR::CompiledShaderInfo& info) {
 	return std::ranges::any_of(info.info.images, [](const auto& image) {
 		return image.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim3D;
 	});
