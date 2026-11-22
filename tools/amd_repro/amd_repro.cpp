@@ -186,7 +186,19 @@ ShaderInfo ParseSpirv(const std::vector<uint32_t>& words) {
 	return info;
 }
 
-int RunChild(const std::filesystem::path& spv, uint32_t bits) {
+// Formats tried for the 3D storage image in the dispatch test.
+constexpr VkFormat kImageFormats[] = {
+    VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM,
+    VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16_SFLOAT,
+    VK_FORMAT_R32_SFLOAT,
+};
+constexpr const char* kImageFormatNames[] = {"RGBA16F", "RGBA32F", "RGBA8", "R11G11B10F",
+                                             "RG16F", "R16F", "R32F"};
+// Image create-flag sets: Kyty's, then without 2D_ARRAY_COMPATIBLE, then none.
+constexpr const char* kImageFlagNames[] = {"kyty-flags", "no-2d-array-compat", "no-flags"};
+
+int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format = -1,
+             uint32_t image_flags = 0) {
 	const auto words = ReadSpirv(spv);
 	const auto shader = ParseSpirv(words);
 	if (!shader.compute) {
@@ -493,8 +505,210 @@ int RunChild(const std::filesystem::path& spv, uint32_t bits) {
 		Fail("vkCreateComputePipelines", r);
 	Sleep(1500);
 	vkDeviceWaitIdle(device);
-	vkDestroyPipeline(device, pipeline, nullptr);
 	Step("pipeline created OK");
+	if (image_format < 0) {
+		vkDestroyPipeline(device, pipeline, nullptr);
+		return 0;
+	}
+
+	// Dispatch test: a real 3D storage image made the way Kyty makes it (image.cpp), bound with
+	// push descriptors, written by the shader on the GPU.
+	DEVICE_FN(vkCreateImage);
+	DEVICE_FN(vkGetImageMemoryRequirements);
+	DEVICE_FN(vkAllocateMemory);
+	DEVICE_FN(vkBindImageMemory);
+	DEVICE_FN(vkCreateImageView);
+	DEVICE_FN(vkCreateBuffer);
+	DEVICE_FN(vkGetBufferMemoryRequirements);
+	DEVICE_FN(vkBindBufferMemory);
+	DEVICE_FN(vkCreateCommandPool);
+	DEVICE_FN(vkAllocateCommandBuffers);
+	DEVICE_FN(vkBeginCommandBuffer);
+	DEVICE_FN(vkEndCommandBuffer);
+	DEVICE_FN(vkCmdPipelineBarrier);
+	DEVICE_FN(vkCmdBindPipeline);
+	DEVICE_FN(vkCmdPushConstants);
+	DEVICE_FN(vkCmdDispatch);
+	DEVICE_FN(vkGetDeviceQueue);
+	DEVICE_FN(vkQueueSubmit);
+	DEVICE_FN(vkQueueWaitIdle);
+	DEVICE_FN(vkCreateDescriptorPool);
+	DEVICE_FN(vkAllocateDescriptorSets);
+	DEVICE_FN(vkUpdateDescriptorSets);
+	DEVICE_FN(vkCmdBindDescriptorSets);
+	auto vkCmdPushDescriptorSetKHR =
+	    reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR"));
+	INSTANCE_FN(vkGetPhysicalDeviceMemoryProperties);
+	VkPhysicalDeviceMemoryProperties memory_properties {};
+	vkGetPhysicalDeviceMemoryProperties(physical, &memory_properties);
+	const auto memory_type = [&](uint32_t type_bits) {
+		for (uint32_t i = 0; i < memory_properties.memoryTypeCount; i++) {
+			if ((type_bits & (1u << i)) &&
+			    (memory_properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+				return i;
+		}
+		for (uint32_t i = 0; i < memory_properties.memoryTypeCount; i++)
+			if (type_bits & (1u << i)) return i;
+		return 0u;
+	};
+
+	const VkFormat format = kImageFormats[image_format];
+	VkImageCreateInfo image_info {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+	if (image_flags == 0) {
+		image_info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT |
+		                   VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
+	} else if (image_flags == 1) {
+		image_info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+	}
+	image_info.imageType   = VK_IMAGE_TYPE_3D;
+	image_info.format      = format;
+	image_info.extent      = {64, 64, 32};
+	image_info.mipLevels   = 1;
+	image_info.arrayLayers = 1;
+	image_info.samples     = VK_SAMPLE_COUNT_1_BIT;
+	image_info.tiling      = VK_IMAGE_TILING_OPTIMAL;
+	// Usage as Kyty picks it (ImageUsageFlags): from the format's optimal-tiling features.
+	INSTANCE_FN(vkGetPhysicalDeviceFormatProperties);
+	VkFormatProperties format_properties {};
+	vkGetPhysicalDeviceFormatProperties(physical, format, &format_properties);
+	const auto features = format_properties.optimalTilingFeatures;
+	if (!(features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
+		Step("format has no storage-image support, skipped");
+		return 3;
+	}
+	image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+	                   VK_IMAGE_USAGE_STORAGE_BIT;
+	if (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) image_info.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+	if (features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)
+		image_info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VkImage image = VK_NULL_HANDLE;
+	Step("creating 3D image");
+	if (auto r = vkCreateImage(device, &image_info, nullptr, &image); r != VK_SUCCESS)
+		Fail("vkCreateImage", r);
+	VkMemoryRequirements image_requirements {};
+	vkGetImageMemoryRequirements(device, image, &image_requirements);
+	VkMemoryAllocateInfo allocate {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+	allocate.allocationSize  = image_requirements.size;
+	allocate.memoryTypeIndex = memory_type(image_requirements.memoryTypeBits);
+	VkDeviceMemory image_memory = VK_NULL_HANDLE;
+	if (auto r = vkAllocateMemory(device, &allocate, nullptr, &image_memory); r != VK_SUCCESS)
+		Fail("vkAllocateMemory(image)", r);
+	vkBindImageMemory(device, image, image_memory, 0);
+
+	VkImageViewUsageCreateInfo view_usage {VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+	view_usage.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+	VkImageViewCreateInfo view_info {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+	if (image_flags != 2) view_info.pNext = &view_usage;
+	view_info.image            = image;
+	view_info.viewType         = VK_IMAGE_VIEW_TYPE_3D;
+	view_info.format           = format;
+	view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+	VkImageView view = VK_NULL_HANDLE;
+	Step("creating 3D image view");
+	if (auto r = vkCreateImageView(device, &view_info, nullptr, &view); r != VK_SUCCESS)
+		Fail("vkCreateImageView", r);
+
+	VkBufferCreateInfo buffer_info {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+	buffer_info.size  = 65536;
+	buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+	VkBuffer buffer = VK_NULL_HANDLE;
+	if (auto r = vkCreateBuffer(device, &buffer_info, nullptr, &buffer); r != VK_SUCCESS)
+		Fail("vkCreateBuffer", r);
+	VkMemoryRequirements buffer_requirements {};
+	vkGetBufferMemoryRequirements(device, buffer, &buffer_requirements);
+	allocate.allocationSize  = buffer_requirements.size;
+	allocate.memoryTypeIndex = memory_type(buffer_requirements.memoryTypeBits);
+	VkDeviceMemory buffer_memory = VK_NULL_HANDLE;
+	if (auto r = vkAllocateMemory(device, &allocate, nullptr, &buffer_memory); r != VK_SUCCESS)
+		Fail("vkAllocateMemory(buffer)", r);
+	vkBindBufferMemory(device, buffer, buffer_memory, 0);
+
+	VkCommandPoolCreateInfo pool_info {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+	pool_info.queueFamilyIndex = family;
+	VkCommandPool pool = VK_NULL_HANDLE;
+	vkCreateCommandPool(device, &pool_info, nullptr, &pool);
+	VkCommandBufferAllocateInfo command_info {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+	command_info.commandPool        = pool;
+	command_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	command_info.commandBufferCount = 1;
+	VkCommandBuffer command = VK_NULL_HANDLE;
+	vkAllocateCommandBuffers(device, &command_info, &command);
+	VkCommandBufferBeginInfo begin {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+	vkBeginCommandBuffer(command, &begin);
+	VkImageMemoryBarrier barrier {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+	barrier.srcAccessMask       = 0;
+	barrier.dstAccessMask       = VK_ACCESS_SHADER_WRITE_BIT;
+	barrier.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+	barrier.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image               = image;
+	barrier.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+	vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+	                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+	vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+
+	std::vector<VkWriteDescriptorSet> writes;
+	std::vector<VkDescriptorBufferInfo> buffer_infos(shader.bindings.size());
+	std::vector<VkDescriptorImageInfo>  image_infos(shader.bindings.size());
+	for (size_t i = 0; i < shader.bindings.size(); i++) {
+		const auto& b = shader.bindings[i];
+		if (b.set != 0) continue;
+		VkWriteDescriptorSet write {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+		write.dstBinding      = b.index;
+		write.descriptorCount = 1;
+		write.descriptorType  = b.type;
+		if (b.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || b.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+			buffer_infos[i]     = {buffer, 0, VK_WHOLE_SIZE};
+			write.pBufferInfo   = &buffer_infos[i];
+		} else if (b.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+			image_infos[i]      = {VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
+			write.pImageInfo    = &image_infos[i];
+		} else {
+			continue;
+		}
+		writes.push_back(write);
+	}
+	if (push_desc && vkCmdPushDescriptorSetKHR != nullptr) {
+		vkCmdPushDescriptorSetKHR(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0,
+		                          static_cast<uint32_t>(writes.size()), writes.data());
+	} else {
+		VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8},
+		                                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8}};
+		VkDescriptorPoolCreateInfo descriptor_pool_info {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+		descriptor_pool_info.maxSets       = 1;
+		descriptor_pool_info.poolSizeCount = 2;
+		descriptor_pool_info.pPoolSizes    = sizes;
+		VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
+		vkCreateDescriptorPool(device, &descriptor_pool_info, nullptr, &descriptor_pool);
+		VkDescriptorSetAllocateInfo set_info {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+		set_info.descriptorPool     = descriptor_pool;
+		set_info.descriptorSetCount = 1;
+		set_info.pSetLayouts        = &set_layouts[0];
+		VkDescriptorSet set = VK_NULL_HANDLE;
+		vkAllocateDescriptorSets(device, &set_info, &set);
+		for (auto& w: writes) w.dstSet = set;
+		vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+		vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 1, &set,
+		                        0, nullptr);
+	}
+	const uint32_t push_data[32] = {};
+	vkCmdPushConstants(command, pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_data),
+	                   push_data);
+	vkCmdDispatch(command, 8, 8, 32);
+	vkEndCommandBuffer(command);
+	VkQueue queue = VK_NULL_HANDLE;
+	vkGetDeviceQueue(device, family, 0, &queue);
+	VkSubmitInfo submit {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+	submit.commandBufferCount = 1;
+	submit.pCommandBuffers    = &command;
+	Step("submitting dispatch");
+	if (auto r = vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE); r != VK_SUCCESS)
+		Fail("vkQueueSubmit", r);
+	if (auto r = vkQueueWaitIdle(queue); r != VK_SUCCESS) Fail("vkQueueWaitIdle", r);
+	Sleep(1000);
+	Step("dispatch finished OK");
 	return 0;
 }
 
@@ -503,7 +717,7 @@ std::string Describe(DWORD code) {
 	switch (code) {
 		case 0: return "OK";
 		case 2: return "Vulkan error (see output)";
-		case 3: return "skipped (not compute)";
+		case 3: return "skipped";
 		case 4: return "no Vulkan";
 		case 0xC0000005: return "CRASH (access violation)";
 		case STILL_ACTIVE: return "HUNG (killed after 60 s)";
@@ -515,13 +729,24 @@ std::string Describe(DWORD code) {
 
 int main(int argc, char** argv) {
 	if (argc >= 4 && std::strcmp(argv[1], "--child") == 0) {
-		return RunChild(argv[2], static_cast<uint32_t>(std::strtoul(argv[3], nullptr, 10)));
+		const int image_format = argc >= 6 ? std::atoi(argv[4]) : -1;
+		const auto image_flags = argc >= 6 ? static_cast<uint32_t>(std::atoi(argv[5])) : 0u;
+		return RunChild(argv[2], static_cast<uint32_t>(std::strtoul(argv[3], nullptr, 10)),
+		                image_format, image_flags);
 	}
-	const std::filesystem::path folder = argc >= 2 ? argv[1] : ".";
+	// amd_repro.exe --dispatch <shader.spv>: runs the shader on real 3D images.
+	const bool dispatch = argc >= 3 && std::strcmp(argv[1], "--dispatch") == 0;
+	const std::filesystem::path folder =
+	    dispatch ? std::filesystem::path(argv[2]).parent_path() : (argc >= 2 ? argv[1] : ".");
 	std::vector<std::filesystem::path> shaders;
-	for (const auto& entry: std::filesystem::directory_iterator(folder)) {
-		const auto name = entry.path().filename().string();
-		if (entry.path().extension() == ".spv" && name.rfind("CS_", 0) == 0) shaders.push_back(entry.path());
+	if (dispatch) {
+		shaders.push_back(argv[2]);
+	} else {
+		for (const auto& entry: std::filesystem::directory_iterator(folder)) {
+			const auto name = entry.path().filename().string();
+			if (entry.path().extension() == ".spv" && name.rfind("CS_", 0) == 0)
+				shaders.push_back(entry.path());
+		}
 	}
 	if (shaders.empty()) {
 		std::printf("No CS_*.spv files in %s\n", folder.string().c_str());
@@ -530,21 +755,42 @@ int main(int argc, char** argv) {
 	char self[MAX_PATH];
 	GetModuleFileNameA(nullptr, self, MAX_PATH);
 
-	std::ofstream results(folder / "amd_repro_results.txt");
+	std::ofstream results(folder / (dispatch ? "amd_repro_dispatch_results.txt" : "amd_repro_results.txt"));
 	const auto report = [&](const std::string& line) {
 		std::printf("%s\n", line.c_str());
 		std::fflush(stdout);
 		results << line << "\n";
 		results.flush();
 	};
-	report("amd_repro: " + std::to_string(shaders.size()) + " compute shaders x " +
-	       std::to_string(std::size(kVariants)) + " variants");
+	report("amd_repro: " + std::to_string(shaders.size()) + " compute shaders" +
+	       (dispatch ? ", dispatch on real 3D images" : ""));
+	struct Job {
+		std::filesystem::path shader;
+		uint32_t              bits;
+		int                   format;
+		uint32_t              flags;
+		std::string           label;
+	};
+	std::vector<Job> jobs;
 	for (const auto& shader: shaders) {
-		for (const auto& variant: kVariants) {
-			std::printf("%s [%s]\n", shader.filename().string().c_str(), variant.name);
+		if (dispatch) {
+			for (int format = 0; format < static_cast<int>(std::size(kImageFormats)); format++)
+				for (uint32_t flags = 0; flags < 3; flags++)
+					jobs.push_back({shader, kLikeKyty, format, flags,
+					                std::string(kImageFormatNames[format]) + " " + kImageFlagNames[flags]});
+			jobs.push_back({shader, kLikeKyty & ~kPushDesc, 0, 0, "RGBA16F kyty-flags descriptor-set"});
+		} else {
+			for (const auto& variant: kVariants) jobs.push_back({shader, variant.bits, -1, 0, variant.name});
+		}
+	}
+	for (const auto& job: jobs) {
+		const auto& shader = job.shader;
+		{
+			std::printf("%s [%s]\n", shader.filename().string().c_str(), job.label.c_str());
 			std::fflush(stdout);
 			std::string command = std::string("\"") + self + "\" --child \"" + shader.string() + "\" " +
-			                      std::to_string(variant.bits);
+			                      std::to_string(job.bits) + " " + std::to_string(job.format) + " " +
+			                      std::to_string(job.flags);
 			STARTUPINFOA startup {sizeof(startup)};
 			PROCESS_INFORMATION process {};
 			if (!CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
@@ -561,8 +807,8 @@ int main(int argc, char** argv) {
 			CloseHandle(process.hProcess);
 			CloseHandle(process.hThread);
 			char line[512];
-			std::snprintf(line, sizeof(line), "%-48s %-20s %s", shader.filename().string().c_str(),
-			              variant.name, Describe(code).c_str());
+			std::snprintf(line, sizeof(line), "%-48s %-34s %s", shader.filename().string().c_str(),
+			              job.label.c_str(), Describe(code).c_str());
 			report(line);
 		}
 	}
