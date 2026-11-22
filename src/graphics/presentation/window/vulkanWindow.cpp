@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <memory>
@@ -532,6 +533,12 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	graphics.attachment_feedback_loop_enabled = feedback_layout.attachmentFeedbackLoopLayout &&
 	                                            feedback_dynamic.attachmentFeedbackLoopDynamicState;
 	graphics.maintenance8_enabled             = maintenance8.maintenance8;
+	// Diagnostic switch for driver crashes: KYTY_MAINTENANCE8=off leaves maintenance8 disabled.
+	if (const char* value = std::getenv("KYTY_MAINTENANCE8");
+	    value != nullptr && std::strcmp(value, "off") == 0) {
+		graphics.maintenance8_enabled = false;
+		maintenance8.maintenance8     = VK_FALSE;
+	}
 	graphics.ray_query_enabled                = ray_query_enabled;
 	// A coarser alignment rounds the range up past the guest's last byte.
 	graphics.robust_buffer_access_enabled =
@@ -623,6 +630,17 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 		features13.computeFullSubgroups        = supported13.computeFullSubgroups;
 	}
 
+	// Diagnostic switch for AMD's driver crashing on shaders that use 3D images:
+	// KYTY_ROBUST_IMAGE=v1 disables robustImageAccess2, =off also disables robustImageAccess.
+	if (const char* value = std::getenv("KYTY_ROBUST_IMAGE"); value != nullptr) {
+		const bool off = std::strcmp(value, "off") == 0;
+		if (off || std::strcmp(value, "v1") == 0) {
+			robustness2.robustImageAccess2 = VK_FALSE;
+		}
+		if (off) {
+			features13.robustImageAccess = VK_FALSE;
+		}
+	}
 	LOGF("Vulkan robustness: robustImageAccess=%s robustImageAccess2=%s buffer bounds=%s\n",
 	     features13.robustImageAccess == VK_TRUE ? "true" : "false",
 	     robustness2.robustImageAccess2 == VK_TRUE ? "true" : "false",
