@@ -834,11 +834,8 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	}
 }
 
-// AMD's Vulkan driver (amdvlk64.dll, Adrenalin 26.10.1 and 26.11.2 on an RX 6800 XT) crashes on
-// one of its own threads while compiling the pipeline for some compute shaders; the SPIR-V passes
-// validation. Dispatches of the shaders listed in KYTY_SKIP_CS_HASHES (hex hashes separated by
-// commas or spaces) are dropped instead. Without the variable, the known Demon's Souls shader is
-// dropped on AMD GPUs only; KYTY_SKIP_CS_HASHES=none drops nothing.
+// Diagnostic: dispatches of the compute shaders listed in KYTY_SKIP_CS_HASHES (hex hashes
+// separated by commas or spaces) are dropped instead of handed to the driver.
 bool IsSkippedComputeShader(uint64_t hash, uint32_t vendor_id) {
 	static const std::vector<uint64_t> skipped = [vendor_id] {
 		std::vector<uint64_t> list;
@@ -846,11 +843,8 @@ bool IsSkippedComputeShader(uint64_t hash, uint32_t vendor_id) {
 		if (env != nullptr && std::strcmp(env, "none") == 0) {
 			return list;
 		}
+		(void)vendor_id;
 		if (env == nullptr) {
-			constexpr uint32_t AmdVendorId = 0x1002u;
-			if (vendor_id == AmdVendorId) {
-				list.push_back(0xe2e002629079222fULL); // Demon's Souls (PPSA01341)
-			}
 			return list;
 		}
 		const char* cursor = env;
@@ -871,10 +865,9 @@ bool IsSkippedComputeShader(uint64_t hash, uint32_t vendor_id) {
 	return std::ranges::find(skipped, hash) != skipped.end();
 }
 
-// Every compute shader that used a 3D image (stored, loaded or queried) crashed AMD's driver in
-// Demon's Souls, while those using only 1D/2D images compiled; AMD's driver starts compiling as
-// soon as the shader module is created. On AMD GPUs such shaders are therefore not handed to the
-// driver at all; KYTY_AMD_3D_STORAGE_WRITES=keep turns this off.
+// Diagnostic: KYTY_AMD_3D_SKIP=on keeps compute shaders that use 3D images away from AMD's driver.
+// Not needed since the tiler shaders stopped using vector spec-constant selects, which were what
+// crashed amdvlk64.dll when 3D textures were detiled.
 bool IsHostSkippedShader(const ShaderRecompiler::IR::CompiledShaderInfo& info, uint32_t vendor_id) {
 	if (info.stage != ShaderType::Compute) {
 		return false;
@@ -883,8 +876,8 @@ bool IsHostSkippedShader(const ShaderRecompiler::IR::CompiledShaderInfo& info, u
 		return true;
 	}
 	static const bool keep = [] {
-		const char* value = std::getenv("KYTY_AMD_3D_STORAGE_WRITES");
-		return value != nullptr && std::strcmp(value, "keep") == 0;
+		const char* value = std::getenv("KYTY_AMD_3D_SKIP");
+		return value == nullptr || std::strcmp(value, "on") != 0;
 	}();
 	constexpr uint32_t AmdVendorId = 0x1002u;
 	if (keep || vendor_id != AmdVendorId) {
