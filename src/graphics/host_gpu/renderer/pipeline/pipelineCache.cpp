@@ -854,9 +854,10 @@ bool IsSkippedComputeShader(uint64_t hash, uint32_t vendor_id) {
 	return std::ranges::find(skipped, hash) != skipped.end();
 }
 
-// The AMD crashes so far are all compute shaders that write 3D storage images, and AMD's
-// driver starts compiling as soon as the shader module is created. On AMD GPUs such shaders are
-// therefore not handed to the driver at all; KYTY_AMD_3D_STORAGE_WRITES=keep turns this off.
+// Every compute shader that used a 3D image (stored, loaded or queried) crashed AMD's driver in
+// Demon's Souls, while those using only 1D/2D images compiled; AMD's driver starts compiling as
+// soon as the shader module is created. On AMD GPUs such shaders are therefore not handed to the
+// driver at all; KYTY_AMD_3D_STORAGE_WRITES=keep turns this off.
 bool IsHostSkippedShader(const ShaderRecompiler::IR::CompiledShaderInfo& info, uint32_t vendor_id) {
 	if (info.stage != ShaderType::Compute) {
 		return false;
@@ -873,9 +874,7 @@ bool IsHostSkippedShader(const ShaderRecompiler::IR::CompiledShaderInfo& info, u
 		return false;
 	}
 	return std::ranges::any_of(info.info.images, [](const auto& image) {
-		return image.resource_class == ShaderRecompiler::IR::ImageResourceClass::Storage &&
-		       image.written &&
-		       image.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim3D;
+		return image.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim3D;
 	});
 }
 
