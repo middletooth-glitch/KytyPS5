@@ -12,6 +12,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -30,6 +31,10 @@ constexpr uint32_t kSubgroup = 1u << 1; // requiredSubgroupSize = 64
 constexpr uint32_t kPushDesc = 1u << 2; // push-descriptor set layout
 constexpr uint32_t kCache    = 1u << 3; // VkPipelineCache
 constexpr uint32_t kRobust2  = 1u << 4; // VK_EXT_robustness2 features
+constexpr uint32_t kAllExt   = 1u << 5; // Kyty's optional device extensions and their features
+constexpr uint32_t kReserve  = 1u << 6; // Kyty's guest address-space reservation (memory.cpp)
+constexpr uint32_t kReserveLow = 1u << 7; // the same, only below 4 GiB
+constexpr uint32_t kLikeKyty = kFeatures | kSubgroup | kPushDesc | kCache | kRobust2;
 
 struct Variant {
 	uint32_t    bits;
@@ -37,12 +42,48 @@ struct Variant {
 };
 // Every variant enables Kyty's device features: its shaders declare capabilities that need them.
 constexpr Variant kVariants[] = {
-    {kFeatures, "kyty-features"},
-    {kFeatures | kSubgroup, "features+wave64"},
-    {kFeatures | kPushDesc, "features+push-desc"},
-    {kFeatures | kCache | kRobust2, "features+robust2+cache"},
-    {kFeatures | kSubgroup | kPushDesc | kCache | kRobust2, "like-kyty"},
+    {kLikeKyty, "like-kyty"},
+    {kLikeKyty | kAllExt, "like-kyty+extensions"},
+    {kLikeKyty | kReserve, "like-kyty+address-reserve"},
+    {kLikeKyty | kReserveLow, "like-kyty+reserve-below-4GiB"},
+    {kLikeKyty | kAllExt | kReserve, "like-kyty+ext+reserve"},
 };
+
+// Reserves every free block over 16 MiB in Kyty's guest ranges, as ReserveGuestRegions does.
+void ReserveLikeKyty(bool below_4gib_only) {
+	const std::pair<uint64_t, uint64_t> all[] = {
+	    {0x0000040000ull, 0x1000000000ull},   // HOST_SYSTEM_MANAGED_MIN .. RESERVED_MAX
+	    {0x1000000000ull, 0xfc00000000ull},   // HOST_USER_MIN .. HOST_USER_MAX
+	    {0x080000000000ull, 0x080000000000ull + (512ull << 30)}, // extended memory
+	};
+	const std::pair<uint64_t, uint64_t> low[] = {{0x0000040000ull, 0x100000000ull}};
+	const auto* regions = below_4gib_only ? low : all;
+	const size_t count  = below_4gib_only ? 1 : 3;
+	constexpr uint64_t granularity = 0x10000, minimum = 0x1000000;
+	uint64_t reserved = 0;
+	for (size_t r = 0; r < count; r++) {
+		const auto [start, end] = regions[r];
+		uint64_t next = start;
+		while (next < end) {
+			MEMORY_BASIC_INFORMATION info {};
+			if (VirtualQuery(reinterpret_cast<const void*>(next), &info, sizeof(info)) == 0) break;
+			const auto base = reinterpret_cast<uint64_t>(info.BaseAddress);
+			const auto region_end = std::min<uint64_t>(end, base + info.RegionSize);
+			const auto from = (std::max(base, start) + granularity - 1) & ~(granularity - 1);
+			const auto to   = region_end & ~(granularity - 1);
+			if (info.State == MEM_FREE && to > from && to - from > minimum) {
+				if (VirtualAlloc(reinterpret_cast<void*>(from), to - from, MEM_RESERVE, PAGE_NOACCESS))
+					reserved += to - from;
+			}
+			next = region_end;
+		}
+	}
+	char text[96];
+	std::snprintf(text, sizeof(text), "reserved %llu GiB of address space",
+	              static_cast<unsigned long long>(reserved >> 30));
+	std::printf("    %s\n", text);
+	std::fflush(stdout);
+}
 
 void Step(const char* text) {
 	std::printf("    %s\n", text);
@@ -156,6 +197,9 @@ int RunChild(const std::filesystem::path& spv, uint32_t bits) {
 		Step("vulkan-1.dll not found");
 		return 4;
 	}
+	// Kyty reserves its guest address space before it creates the Vulkan instance, which is
+	// when the driver DLL loads.
+	if (bits & (kReserve | kReserveLow)) ReserveLikeKyty((bits & kReserve) == 0);
 	auto get_instance_proc =
 	    reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(loader, "vkGetInstanceProcAddr"));
 #define INSTANCE_FN(name) auto name = reinterpret_cast<PFN_##name>(get_instance_proc(instance, #name))
@@ -291,6 +335,68 @@ int RunChild(const std::filesystem::path& spv, uint32_t bits) {
 		robust.robustImageAccess2  = s_robust.robustImageAccess2;
 		robust.nullDescriptor      = s_robust.nullDescriptor;
 		f13.pNext = &robust;
+	}
+	// Kyty's other extensions (vulkanWindow.cpp), with the features it enables for them.
+	VkPhysicalDeviceMeshShaderFeaturesEXT mesh {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
+	VkPhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR workgroup {
+	    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_FEATURES_KHR};
+	VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT atomic64 {
+	    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_IMAGE_ATOMIC_INT64_FEATURES_EXT};
+	VkPhysicalDeviceMaintenance8FeaturesKHR maintenance8 {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR};
+	VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR derivatives {
+	    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR};
+	VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR barycentric {
+	    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR};
+	VkPhysicalDeviceShaderClockFeaturesKHR clock {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR};
+	VkPhysicalDeviceDepthClipEnableFeaturesEXT clip_enable {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT};
+	VkPhysicalDeviceDepthClipControlFeaturesEXT clip_control {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT};
+	VkPhysicalDeviceImageViewMinLodFeaturesEXT min_lod {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT};
+	VkPhysicalDeviceExtendedDynamicStateFeaturesEXT dynamic_state {
+	    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
+	if (bits & kAllExt) {
+		struct Extension {
+			const char* name;
+			void*       features;
+		};
+		const Extension list[] = {
+		    {VK_EXT_MEMORY_BUDGET_EXTENSION_NAME, nullptr},
+		    {VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME, nullptr},
+		    {"VK_KHR_maintenance1", nullptr},
+		    {VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME, &dynamic_state},
+		    {VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME, &workgroup},
+		    {VK_EXT_MESH_SHADER_EXTENSION_NAME, &mesh},
+		    {VK_KHR_MAINTENANCE_8_EXTENSION_NAME, &maintenance8},
+		    {VK_KHR_SHADER_CLOCK_EXTENSION_NAME, &clock},
+		    {VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME, &atomic64},
+		    {VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, &barycentric},
+		    {VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME, &derivatives},
+		    {VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME, &clip_enable},
+		    {VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME, &clip_control},
+		    {VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME, &min_lod},
+		};
+		// Query what the device supports through the same structs, then enable it.
+		VkBaseOutStructure* chain = nullptr;
+		for (const auto& e: list) {
+			if (!has(e.name)) continue;
+			extensions.push_back(e.name);
+			if (e.features != nullptr) {
+				auto* base  = static_cast<VkBaseOutStructure*>(e.features);
+				base->pNext = chain;
+				chain       = base;
+			}
+		}
+		if (chain != nullptr) {
+			VkPhysicalDeviceFeatures2 query {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, chain};
+			vkGetPhysicalDeviceFeatures2(physical, &query);
+			// As Kyty: no mesh multiview/VRS, no sparse int64 atomics.
+			mesh.multiviewMeshShader = VK_FALSE;
+			mesh.primitiveFragmentShadingRateMeshShader = VK_FALSE;
+			mesh.meshShaderQueries = VK_FALSE;
+			atomic64.sparseImageInt64Atomics = VK_FALSE;
+			auto* tail = static_cast<VkBaseOutStructure*>(f2.pNext);
+			while (tail->pNext != nullptr) tail = tail->pNext;
+			tail->pNext = chain;
+		}
 	}
 	const bool push_desc = (bits & kPushDesc) && has(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
 	if (push_desc) extensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
