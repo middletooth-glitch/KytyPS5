@@ -622,6 +622,49 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 	return true;
 }
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+// Vectored handlers run before a DLL's own __try/__except blocks. Graphics drivers (seen with
+// AMD's amdvlk64.dll) can fault on their own worker threads and recover through SEH, so a fault
+// whose PC is inside a host DLL other than the emulator and the C runtime it calls into is passed
+// on instead of terminating. Faults the DLL does not handle still end the process.
+// Set KYTY_HOST_DLL_FAULTS=fatal to restore the old behaviour.
+static bool IsForeignHostModuleFault(uint64_t address, char* name, size_t name_size) {
+	static const bool disabled = [] {
+		const char* value = std::getenv("KYTY_HOST_DLL_FAULTS");
+		return value != nullptr && std::strcmp(value, "fatal") == 0;
+	}();
+	if (disabled) {
+		return false;
+	}
+	HMODULE module = nullptr;
+	if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+	                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+	                       reinterpret_cast<LPCSTR>(address), &module) == 0 ||
+	    module == nullptr || module == GetModuleHandleA(nullptr)) {
+		return false;
+	}
+	if (GetModuleFileNameA(module, name, static_cast<DWORD>(name_size)) == 0) {
+		name[0] = '\0';
+	}
+	const char* base = name;
+	for (const char* c = name; *c != '\0'; c++) {
+		if (*c == '\\' || *c == '/') {
+			base = c + 1;
+		}
+	}
+	// Faults in these come from emulator code passing a bad pointer, not from the DLL itself.
+	static constexpr const char* kRuntimeModules[] = {
+	    "ntdll.dll",        "kernelbase.dll",   "kernel32.dll",    "ucrtbase.dll",
+	    "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "libwinpthread-1.dll"};
+	for (const char* runtime: kRuntimeModules) {
+		if (_stricmp(base, runtime) == 0) {
+			return false;
+		}
+	}
+	return true;
+}
+#endif
+
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
@@ -651,6 +694,21 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			return true;
 		}
 	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	if (info->type == Common::HostException::ExceptionType::AccessViolation) {
+		char module_name[MAX_PATH] = {};
+		if (IsForeignHostModuleFault(info->exception_address, module_name, sizeof(module_name))) {
+			static std::atomic<uint32_t> reported {0};
+			if (reported.fetch_add(1, std::memory_order_relaxed) < 16u) {
+				std::printf("Host DLL fault passed to its own handler: pc=0x%016" PRIx64
+				            " address=0x%016" PRIx64 " module=%s\n",
+				            info->exception_address, info->access_violation_vaddr, module_name);
+				std::fflush(stdout);
+			}
+			return false;
+		}
+	}
+#endif
 	// Report whatever guest context can be read safely before terminating: which guest thread
 	// faulted, the register file, the faulting code bytes and the top of its stack.
 	{
