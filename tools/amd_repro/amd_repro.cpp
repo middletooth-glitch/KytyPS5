@@ -197,8 +197,14 @@ constexpr const char* kImageFormatNames[] = {"RGBA16F", "RGBA32F", "RGBA8", "R11
 // Image create-flag sets: Kyty's, then without 2D_ARRAY_COMPATIBLE, then none.
 constexpr const char* kImageFlagNames[] = {"kyty-flags", "no-2d-array-compat", "no-flags"};
 
+// Transfer operations on a 3D image like the ones Kyty records right after creating one
+// (Image::Upload, TextureCache clears): 0 barrier only, 1 copy from a buffer, 2 clear,
+// 3 clear with a sync1 barrier, 4 copy + clear + barrier back to GENERAL.
+constexpr const char* kOpNames[] = {"barrier2", "copy-buffer-to-image", "clear", "clear-sync1",
+                                    "copy+clear+general"};
+
 int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format = -1,
-             uint32_t image_flags = 0) {
+             uint32_t image_flags = 0, int op = -1) {
 	const auto words = ReadSpirv(spv);
 	const auto shader = ParseSpirv(words);
 	if (!shader.compute) {
@@ -562,7 +568,7 @@ int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format =
 	}
 	image_info.imageType   = VK_IMAGE_TYPE_3D;
 	image_info.format      = format;
-	image_info.extent      = {64, 64, 32};
+	image_info.extent      = op >= 0 ? VkExtent3D {256, 256, 4} : VkExtent3D {64, 64, 32};
 	image_info.mipLevels   = 1;
 	image_info.arrayLayers = 1;
 	image_info.samples     = VK_SAMPLE_COUNT_1_BIT;
@@ -611,7 +617,7 @@ int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format =
 
 	VkBufferCreateInfo buffer_info {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
 	buffer_info.size  = 65536;
-	buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+	buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 	VkBuffer buffer = VK_NULL_HANDLE;
 	if (auto r = vkCreateBuffer(device, &buffer_info, nullptr, &buffer); r != VK_SUCCESS)
 		Fail("vkCreateBuffer", r);
@@ -636,6 +642,73 @@ int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format =
 	vkAllocateCommandBuffers(device, &command_info, &command);
 	VkCommandBufferBeginInfo begin {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
 	vkBeginCommandBuffer(command, &begin);
+	if (op >= 0) {
+		DEVICE_FN(vkCmdPipelineBarrier2);
+		DEVICE_FN(vkCmdCopyBufferToImage);
+		DEVICE_FN(vkCmdClearColorImage);
+		const VkImageSubresourceRange range {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		const auto barrier2 = [&](VkImageLayout from, VkImageLayout to) {
+			VkImageMemoryBarrier2 b {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+			b.srcStageMask        = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+			b.srcAccessMask       = VK_ACCESS_2_MEMORY_WRITE_BIT;
+			b.dstStageMask        = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+			b.dstAccessMask       = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+			b.oldLayout           = from;
+			b.newLayout           = to;
+			b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			b.image               = image;
+			b.subresourceRange    = range;
+			VkDependencyInfo dependency {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+			dependency.dependencyFlags         = VK_DEPENDENCY_BY_REGION_BIT;
+			dependency.imageMemoryBarrierCount = 1;
+			dependency.pImageMemoryBarriers    = &b;
+			vkCmdPipelineBarrier2(command, &dependency);
+		};
+		if (op == 3) {
+			VkImageMemoryBarrier b {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+			b.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+			b.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+			b.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			b.image               = image;
+			b.subresourceRange    = range;
+			vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+			                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+		} else {
+			barrier2(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		}
+		if (op == 1 || op == 4) {
+			// The buffer holds 64 KiB; copy the rows that fit, a full-width 3D region.
+			const uint32_t texel = format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8u : 4u;
+			const uint32_t rows  = 65536u / (256u * texel);
+			VkBufferImageCopy copy {};
+			copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			copy.imageExtent      = {256, rows, 1};
+			vkCmdCopyBufferToImage(command, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+			                       &copy);
+		}
+		if (op == 2 || op == 3 || op == 4) {
+			VkClearColorValue color {};
+			color.float32[0] = 1.0f;
+			vkCmdClearColorImage(command, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &color, 1, &range);
+		}
+		if (op == 4) barrier2(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+		vkEndCommandBuffer(command);
+		VkQueue queue = VK_NULL_HANDLE;
+		vkGetDeviceQueue(device, family, 0, &queue);
+		VkSubmitInfo submit {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+		submit.commandBufferCount = 1;
+		submit.pCommandBuffers    = &command;
+		Step("submitting transfer operations");
+		if (auto r = vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE); r != VK_SUCCESS)
+			Fail("vkQueueSubmit", r);
+		if (auto r = vkQueueWaitIdle(queue); r != VK_SUCCESS) Fail("vkQueueWaitIdle", r);
+		Sleep(1500);
+		Step("transfer operations finished OK");
+		return 0;
+	}
 	VkImageMemoryBarrier barrier {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
 	barrier.srcAccessMask       = 0;
 	barrier.dstAccessMask       = VK_ACCESS_SHADER_WRITE_BIT;
@@ -731,11 +804,13 @@ int main(int argc, char** argv) {
 	if (argc >= 4 && std::strcmp(argv[1], "--child") == 0) {
 		const int image_format = argc >= 6 ? std::atoi(argv[4]) : -1;
 		const auto image_flags = argc >= 6 ? static_cast<uint32_t>(std::atoi(argv[5])) : 0u;
+		const int op = argc >= 7 ? std::atoi(argv[6]) : -1;
 		return RunChild(argv[2], static_cast<uint32_t>(std::strtoul(argv[3], nullptr, 10)),
-		                image_format, image_flags);
+		                image_format, image_flags, op);
 	}
 	// amd_repro.exe --dispatch <shader.spv>: runs the shader on real 3D images.
-	const bool dispatch = argc >= 3 && std::strcmp(argv[1], "--dispatch") == 0;
+	const bool ops      = argc >= 3 && std::strcmp(argv[1], "--ops") == 0;
+	const bool dispatch = ops || (argc >= 3 && std::strcmp(argv[1], "--dispatch") == 0);
 	const std::filesystem::path folder =
 	    dispatch ? std::filesystem::path(argv[2]).parent_path() : (argc >= 2 ? argv[1] : ".");
 	std::vector<std::filesystem::path> shaders;
@@ -755,7 +830,9 @@ int main(int argc, char** argv) {
 	char self[MAX_PATH];
 	GetModuleFileNameA(nullptr, self, MAX_PATH);
 
-	std::ofstream results(folder / (dispatch ? "amd_repro_dispatch_results.txt" : "amd_repro_results.txt"));
+	std::ofstream results(folder / (ops ? "amd_repro_ops_results.txt"
+	                                    : dispatch ? "amd_repro_dispatch_results.txt"
+	                                               : "amd_repro_results.txt"));
 	const auto report = [&](const std::string& line) {
 		std::printf("%s\n", line.c_str());
 		std::fflush(stdout);
@@ -770,10 +847,17 @@ int main(int argc, char** argv) {
 		int                   format;
 		uint32_t              flags;
 		std::string           label;
+		int                   op = -1;
 	};
 	std::vector<Job> jobs;
 	for (const auto& shader: shaders) {
-		if (dispatch) {
+		if (ops) {
+			// Kyty's 3D images in Demon's Souls: 256x256x4, RGBA16F (format 97) and R32F (100).
+			for (const int format: {0, 6})
+				for (int op = 0; op < static_cast<int>(std::size(kOpNames)); op++)
+					jobs.push_back({shader, kLikeKyty, format, 0,
+					                std::string(kImageFormatNames[format]) + " " + kOpNames[op], op});
+		} else if (dispatch) {
 			for (int format = 0; format < static_cast<int>(std::size(kImageFormats)); format++)
 				for (uint32_t flags = 0; flags < 3; flags++)
 					jobs.push_back({shader, kLikeKyty, format, flags,
@@ -790,7 +874,7 @@ int main(int argc, char** argv) {
 			std::fflush(stdout);
 			std::string command = std::string("\"") + self + "\" --child \"" + shader.string() + "\" " +
 			                      std::to_string(job.bits) + " " + std::to_string(job.format) + " " +
-			                      std::to_string(job.flags);
+			                      std::to_string(job.flags) + " " + std::to_string(job.op);
 			STARTUPINFOA startup {sizeof(startup)};
 			PROCESS_INFORMATION process {};
 			if (!CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
