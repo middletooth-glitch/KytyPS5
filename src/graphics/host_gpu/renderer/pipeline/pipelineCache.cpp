@@ -450,6 +450,13 @@ void PipelineCache::InitializeDriverCache() {
 		PipelineCacheLog("Vulkan pipeline cache: disabled (non-Release build)");
 		return;
 	}
+	// Diagnostic switch for the AMD driver crash: KYTY_DRIVER_CACHE=off creates pipelines without a
+	// VkPipelineCache, so vkGetPipelineCacheData never runs on the store thread.
+	if (const char* value = std::getenv("KYTY_DRIVER_CACHE");
+	    value != nullptr && std::strcmp(value, "off") == 0) {
+		PipelineCacheLog("Vulkan pipeline cache: disabled (KYTY_DRIVER_CACHE=off)");
+		return;
+	}
 	m_driver_cache_path     = std::filesystem::path("_PipelineCache") / (title_id + ".bin");
 	const auto path         = Common::PathToString(m_driver_cache_path);
 	const bool cache_exists = Common::File::IsFileExisting(m_driver_cache_path);
