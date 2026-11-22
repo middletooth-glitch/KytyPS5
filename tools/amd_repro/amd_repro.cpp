@@ -184,7 +184,10 @@ ShaderInfo ParseSpirv(const std::vector<uint32_t>& words) {
 		else if (t.op == 27) binding.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		else if (t.op == 5341) binding.type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 		else continue;
-		info.bindings.push_back(binding);
+		// Aliased declarations (the tiler's uint/uint8/uint16 views) share one binding.
+		bool seen = false;
+		for (const auto& b: info.bindings) seen |= b.set == binding.set && b.index == binding.index;
+		if (!seen) info.bindings.push_back(binding);
 	}
 	return info;
 }
@@ -205,6 +208,10 @@ constexpr const char* kImageFlagNames[] = {"kyty-flags", "no-2d-array-compat", "
 // 3 clear with a sync1 barrier, 4 copy + clear + barrier back to GENERAL.
 constexpr const char* kOpNames[] = {"barrier2", "copy-buffer-to-image", "clear", "clear-sync1",
                                     "copy+clear+general"};
+
+// Specialization constants 0 and 1 (the tiler's ELEMENT_BYTES and TILE), when set.
+bool     g_specialize = false;
+uint32_t g_spec_values[2] {};
 
 int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format = -1,
              uint32_t image_flags = 0, int op = -1) {
@@ -506,6 +513,9 @@ int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format =
 	pipeline_info.stage.module = module;
 	pipeline_info.stage.pName  = "main";
 	if ((bits & kSubgroup) && s13.subgroupSizeControl) pipeline_info.stage.pNext = &subgroup;
+	const VkSpecializationMapEntry spec_entries[] {{0, 0, 4}, {1, 4, 4}};
+	const VkSpecializationInfo     spec_info {2, spec_entries, sizeof(g_spec_values), g_spec_values};
+	if (g_specialize) pipeline_info.stage.pSpecializationInfo = &spec_info;
 	pipeline_info.layout = pipeline_layout;
 	VkPipeline pipeline = VK_NULL_HANDLE;
 	DEVICE_FN(vkGetPipelineCacheData);
@@ -833,16 +843,27 @@ int main(int argc, char** argv) {
 		const int image_format = argc >= 6 ? std::atoi(argv[4]) : -1;
 		const auto image_flags = argc >= 6 ? static_cast<uint32_t>(std::atoi(argv[5])) : 0u;
 		const int op = argc >= 7 ? std::atoi(argv[6]) : -1;
+		if (argc >= 9) {
+			g_specialize     = true;
+			g_spec_values[0] = static_cast<uint32_t>(std::atoi(argv[7]));
+			g_spec_values[1] = static_cast<uint32_t>(std::atoi(argv[8]));
+		}
 		return RunChild(argv[2], static_cast<uint32_t>(std::strtoul(argv[3], nullptr, 10)),
 		                image_format, image_flags, op);
 	}
 	// amd_repro.exe --dispatch <shader.spv>: runs the shader on real 3D images.
 	const bool ops      = argc >= 3 && std::strcmp(argv[1], "--ops") == 0;
+	const bool tiler    = argc >= 3 && std::strcmp(argv[1], "--tiler") == 0;
 	const bool dispatch = ops || (argc >= 3 && std::strcmp(argv[1], "--dispatch") == 0);
 	const std::filesystem::path folder =
-	    dispatch ? std::filesystem::path(argv[2]).parent_path() : (argc >= 2 ? argv[1] : ".");
+	    tiler ? std::filesystem::path(argv[2])
+	          : dispatch ? std::filesystem::path(argv[2]).parent_path() : (argc >= 2 ? argv[1] : ".");
 	std::vector<std::filesystem::path> shaders;
-	if (dispatch) {
+	if (tiler) {
+		for (const auto& entry: std::filesystem::recursive_directory_iterator(folder))
+			if (entry.path().extension() == ".spv") shaders.push_back(entry.path());
+		std::sort(shaders.begin(), shaders.end());
+	} else if (dispatch) {
 		shaders.push_back(argv[2]);
 	} else {
 		for (const auto& entry: std::filesystem::directory_iterator(folder)) {
@@ -858,7 +879,8 @@ int main(int argc, char** argv) {
 	char self[MAX_PATH];
 	GetModuleFileNameA(nullptr, self, MAX_PATH);
 
-	std::ofstream results(folder / (ops ? "amd_repro_ops_results.txt"
+	std::ofstream results(folder / (tiler ? "amd_repro_tiler_results.txt"
+	                                : ops ? "amd_repro_ops_results.txt"
 	                                    : dispatch ? "amd_repro_dispatch_results.txt"
 	                                               : "amd_repro_results.txt"));
 	const auto report = [&](const std::string& line) {
@@ -876,10 +898,20 @@ int main(int argc, char** argv) {
 		uint32_t              flags;
 		std::string           label;
 		int                   op = -1;
+		uint32_t              element_bytes = 0;
+		uint32_t              tile = 0;
 	};
 	std::vector<Job> jobs;
 	for (const auto& shader: shaders) {
-		if (ops) {
+		if (tiler) {
+			// TileManager::GetPipeline: ELEMENT_BYTES = 1 << element_index, TILE = direction.
+			for (const uint32_t element_bytes: {1u, 2u, 4u, 8u, 16u})
+				for (const uint32_t tile: {0u, 1u})
+					jobs.push_back({shader, kFeatures | kPushDesc, -1, 0,
+					                "ELEMENT_BYTES=" + std::to_string(element_bytes) +
+					                    " TILE=" + std::to_string(tile),
+					                -1, element_bytes, tile});
+		} else if (ops) {
 			// Kyty's 3D images in Demon's Souls: 256x256x4, RGBA16F (format 97) and R32F (100).
 			for (const int format: {0, 6})
 				for (int op = 0; op < static_cast<int>(std::size(kOpNames)); op++)
@@ -903,6 +935,8 @@ int main(int argc, char** argv) {
 			std::string command = std::string("\"") + self + "\" --child \"" + shader.string() + "\" " +
 			                      std::to_string(job.bits) + " " + std::to_string(job.format) + " " +
 			                      std::to_string(job.flags) + " " + std::to_string(job.op);
+			if (job.element_bytes != 0)
+				command += " " + std::to_string(job.element_bytes) + " " + std::to_string(job.tile);
 			STARTUPINFOA startup {sizeof(startup)};
 			PROCESS_INFORMATION process {};
 			if (!CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
@@ -919,8 +953,10 @@ int main(int argc, char** argv) {
 			CloseHandle(process.hProcess);
 			CloseHandle(process.hThread);
 			char line[512];
-			std::snprintf(line, sizeof(line), "%-48s %-34s %s", shader.filename().string().c_str(),
-			              job.label.c_str(), Describe(code).c_str());
+			const auto shown = tiler ? std::filesystem::relative(shader, folder).string()
+			                         : shader.filename().string();
+			std::snprintf(line, sizeof(line), "%-48s %-34s %s", shown.c_str(), job.label.c_str(),
+			              Describe(code).c_str());
 			report(line);
 		}
 	}
