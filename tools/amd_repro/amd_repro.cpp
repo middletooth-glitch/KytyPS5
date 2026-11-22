@@ -10,6 +10,7 @@
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
+#define NOMINMAX
 #include <windows.h>
 
 #include <algorithm>
