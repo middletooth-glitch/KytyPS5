@@ -15,8 +15,8 @@ jobs:
         shell: bash
         run: |
           git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git vkh
-          git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git spvh
           git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Tools.git spvt
+          git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git spvt/external/spirv-headers
       - name: Build amd_repro
         shell: cmd
         run: |
@@ -25,7 +25,7 @@ jobs:
       - name: Build spirv-reduce
         shell: cmd
         run: |
-          cmake -S spvt -B spvt\build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPIRV-Headers_SOURCE_DIR=%CD%\spvh -DSPIRV_SKIP_TESTS=ON -DSPIRV_WERROR=OFF -DSPIRV_BUILD_FUZZER=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          cmake -S spvt -B spvt\build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPIRV_SKIP_TESTS=ON -DSPIRV_WERROR=OFF -DSPIRV_BUILD_FUZZER=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           cmake --build spvt\build --target spirv-reduce spirv-dis spirv-val
           copy spvt\build\tools\spirv-reduce.exe out\
           copy spvt\build\tools\spirv-dis.exe out\
