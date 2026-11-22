@@ -1039,6 +1039,20 @@ int main(int argc, char** argv) {
 		                image_format, image_flags, op);
 	}
 	if (argc >= 3 && std::strcmp(argv[1], "--reduce") == 0) return Reduce(argv[2]);
+	// Interestingness test for spirv-reduce: exit 0 when the driver crashes on the shader.
+	if (argc >= 3 && std::strcmp(argv[1], "--interesting") == 0) {
+		SetEnvironmentVariableA("AMD_REPRO_FAST", "1");
+		Reducer r;
+		r.module = SplitSpirv(ReadSpirv(argv[2]));
+		r.work   = std::filesystem::path(argv[2]).parent_path();
+		char self[MAX_PATH];
+		GetModuleFileNameA(nullptr, self, MAX_PATH);
+		r.self = self;
+		r.Analyze();
+		std::vector<bool> none(r.candidates.size(), false);
+		const auto copy = std::filesystem::path(argv[2]).filename().string() + ".probe.spv";
+		return r.Crashes(none, copy.c_str()) ? 0 : 1;
+	}
 	// amd_repro.exe --dispatch <shader.spv>: runs the shader on real 3D images.
 	const bool ops      = argc >= 3 && std::strcmp(argv[1], "--ops") == 0;
 	const bool tiler    = argc >= 3 && std::strcmp(argv[1], "--tiler") == 0;

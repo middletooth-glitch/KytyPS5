@@ -11,14 +11,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
-      - name: Get Vulkan headers
-        run: git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git vkh
-      - name: Build
+      - name: Get Vulkan headers and SPIRV-Tools
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git vkh
+          git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git spvh
+          git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Tools.git spvt
+      - name: Build amd_repro
         shell: cmd
         run: |
           mkdir out
           cl /nologo /O2 /EHsc /std:c++17 /W3 /Ivkh\include tools\amd_repro\amd_repro.cpp /Feout\amd_repro.exe
+      - name: Build spirv-reduce
+        shell: cmd
+        run: |
+          cmake -S spvt -B spvt\build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPIRV-Headers_SOURCE_DIR=%CD%\spvh -DSPIRV_SKIP_TESTS=ON -DSPIRV_WERROR=OFF -DSPIRV_BUILD_FUZZER=OFF -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          cmake --build spvt\build --target spirv-reduce spirv-dis spirv-val
+          copy spvt\build\tools\spirv-reduce.exe out\
+          copy spvt\build\tools\spirv-dis.exe out\
+          copy spvt\build\tools\spirv-val.exe out\
       - uses: actions/upload-artifact@v4
         with:
           name: amd_repro
-          path: out/amd_repro.exe
+          path: out/*.exe
