@@ -81,10 +81,10 @@ template <class S, class Key> void IoKey(S& io, Key& key) {
 
 template <class S, class Module> void IoModule(S& io, Module& stage) {
 	// The handle comes from the SPIR-V; stored programs have no function code.
-	// host_skipped is recomputed for the GPU at load time.
+	// host_skipped and amd_wave64_crash_pattern are recomputed at load time.
 	auto& [id, handle, info, specialization, function_code, rect_parameters, mesh_task,
-	       host_skipped] = stage;
-	IoAll(io, id, info, specialization, rect_parameters, mesh_task);
+	       host_skipped, host_subgroup_size, amd_wave64_crash_pattern] = stage;
+	IoAll(io, id, info, specialization, rect_parameters, mesh_task, host_subgroup_size);
 }
 
 } // namespace
@@ -181,8 +181,12 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	}
 	// A compute pipeline depends only on its module.
 	for (const auto* module: modules | std::views::values) {
+		// A wave64 module with the AMD crash pattern is never given a pipeline there.
+		const bool amd_crash = m_graphics.amd_compute_wave32_fallback &&
+		                       module != nullptr && module->amd_wave64_crash_pattern &&
+		                       module->host_subgroup_size == 64u;
 		if (module != nullptr && module->info.stage == ShaderType::Compute &&
-		    !module->host_skipped) {
+		    !module->host_skipped && !amd_crash) {
 			jobs.emplace_back([this, module, &pipeline = m_compute_pipelines[module->id]] {
 				CreatePipelineInternal(m_graphics, pipeline, *module, m_driver_cache, false);
 			});
@@ -249,6 +253,7 @@ bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
 			}
 			module.host_skipped =
 			    IsHostSkippedShader(module.info, m_graphics.GetPhysicalDeviceProperties().vendorID);
+			module.amd_wave64_crash_pattern = HasAmdWave64CrashPattern(spirv);
 			if (!module.host_skipped) {
 				module.module = CompileSPV(spirv, m_graphics.device);
 			}

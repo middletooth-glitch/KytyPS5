@@ -132,7 +132,16 @@ struct ShaderModule {
 	bool                                         mesh_task = false;
 	// Not compiled for the host driver (IsHostSkippedShader): dispatches of it are dropped.
 	bool                                         host_skipped = false;
+	// Compute: the host subgroup size the SPIR-V was emitted for (32 or 64); 0 for other stages.
+	uint32_t                                     host_subgroup_size = 0;
+	// SPIR-V with the lane-shuffle pattern that AMD's driver crashes on in wave64
+	// (HasAmdWave64CrashPattern); recomputed from the SPIR-V, not stored.
+	bool                                         amd_wave64_crash_pattern = false;
 };
+
+// Lane shuffles, ballot bit tests and a loop in one module: AMD's Windows driver (amdvlk64.dll)
+// crashes building a wave64 pipeline for such code (Demon's Souls CS 0x3bcd5b00b85a5447).
+bool HasAmdWave64CrashPattern(std::span<const uint32_t> spirv);
 
 // A draw's depth target and its first color_count color targets.
 struct DrawTargets {

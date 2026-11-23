@@ -525,19 +525,22 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	    subgroup_control.minSubgroupSize <= 64 && subgroup_control.maxSubgroupSize >= 64;
 
 	// AMD's driver crashes compiling some wave64 compute shaders (lane shuffles guarded by
-	// ballots), so on AMD GPUs compute runs in 32-lane subgroups by default, the path NVIDIA
-	// GPUs take. KYTY_COMPUTE_WAVE32=0 keeps wave64, =1 asks for wave32 on any GPU.
+	// ballots). On AMD GPUs those shaders alone run in 32-lane subgroups, the path NVIDIA GPUs
+	// take; the rest stay wave64. KYTY_COMPUTE_WAVE32=1 runs all compute in wave32, =0 none.
 	{
 		constexpr uint32_t AmdVendorId = 0x1002u;
 		const char*        value       = std::getenv("KYTY_COMPUTE_WAVE32");
-		const bool         want =
-		    value != nullptr ? std::strcmp(value, "0") != 0
-		                     : graphics.physical_device_properties.vendorID == AmdVendorId;
-		if (want && graphics.compute_subgroup_size_control_enabled &&
-		    graphics.min_subgroup_size <= 32u && graphics.max_subgroup_size >= 32u) {
+		const bool         can_wave32  = graphics.compute_subgroup_size_control_enabled &&
+		                        graphics.min_subgroup_size <= 32u &&
+		                        graphics.max_subgroup_size >= 32u;
+		if (value != nullptr && std::strcmp(value, "1") == 0 && can_wave32) {
 			graphics.force_compute_wave32 = true;
-			LOGF("Vulkan subgroup: compute runs in wave32%s\n",
-			     value != nullptr ? " (KYTY_COMPUTE_WAVE32)" : " (AMD GPU)");
+			LOGF("Vulkan subgroup: all compute runs in wave32 (KYTY_COMPUTE_WAVE32=1)\n");
+		} else if (value == nullptr && can_wave32 &&
+		           graphics.physical_device_properties.vendorID == AmdVendorId) {
+			graphics.amd_compute_wave32_fallback = true;
+			LOGF("Vulkan subgroup: AMD GPU, compute shaders with lane-shuffle loops run in "
+			     "wave32\n");
 		}
 	}
 	LOGF("Vulkan subgroup: default=%u min=%u max=%u stages=0x%08x size_control=%s wave64=%s\n",

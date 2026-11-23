@@ -277,6 +277,12 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	    .function_code  = {function_code.begin(), function_code.end()},
 	});
 	module.host_skipped = host_skipped;
+	if (key.stage == ShaderType::Compute) {
+		if (const auto* workgroup = ShaderWorkgroupInput(key.stage, options.input_info)) {
+			module.host_subgroup_size = workgroup->host_subgroup_size;
+		}
+	}
+	module.amd_wave64_crash_pattern = HasAmdWave64CrashPattern(result.spirv);
 	if (uses_3d) {
 		TRACE3D("%s shader module hash=0x%016" PRIx64 " end\n", stage, key.hash);
 	}
@@ -886,6 +892,23 @@ bool IsHostSkippedShader(const ShaderRecompiler::IR::CompiledShaderInfo& info, u
 	return UsesImage3D(info);
 }
 
+bool HasAmdWave64CrashPattern(std::span<const uint32_t> spirv) {
+	// SPIR-V opcodes: OpGroupNonUniformShuffle, OpGroupNonUniformBallotBitExtract, OpLoopMerge.
+	constexpr uint32_t OpShuffle = 345u, OpBallotBitExtract = 341u, OpLoopMerge = 246u;
+	bool               shuffle = false, bit_extract = false, loop = false;
+	for (size_t i = 5; i < spirv.size();) {
+		const uint32_t op = spirv[i] & 0xffffu, count = spirv[i] >> 16u;
+		if (count == 0) {
+			break;
+		}
+		shuffle |= op == OpShuffle;
+		bit_extract |= op == OpBallotBitExtract;
+		loop |= op == OpLoopMerge;
+		i += count;
+	}
+	return shuffle && bit_extract && loop;
+}
+
 bool UsesImage3D(const ShaderRecompiler::IR::CompiledShaderInfo& info) {
 	return std::ranges::any_of(info.info.images, [](const auto& image) {
 		return image.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim3D;
@@ -917,6 +940,19 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 			     params.hash);
 		}
 		return nullptr;
+	}
+	// AMD: a wave64 module its driver would crash on is emitted again for 32-lane subgroups.
+	if (module != nullptr && m_graphics.amd_compute_wave32_fallback &&
+	    input_info.host_subgroup_size == 64u && module->amd_wave64_crash_pattern) {
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 64u) {
+			LOGF("GetComputeProgram: compute shader hash=0x%016" PRIx64
+			     " runs in wave32 (AMD wave64 crash pattern)\n",
+			     params.hash);
+		}
+		input_info.host_subgroup_size = 32u;
+		ShaderRecompiler::IR::PushData::Window wave32_push_data;
+		module = GetProgram(params, input_info, wave32_push_data);
 	}
 	// HW_ID2 reads are translated with the graphics compute queue's values.
 	EXIT_NOT_IMPLEMENTED(module != nullptr && input_info.async_compute &&
