@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -336,6 +337,28 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 				const auto end = std::min(std::max(start + DownloadWindowSize, vaddr + size),
 				                          buffer.CpuAddress() + buffer.Size());
 				WaitProfile::Tag tag(is_write ? "CPU write fault" : "CPU read fault");
+				if (WaitProfile::Enabled()) {
+					// The GPU-written binding that covers the faulting address, if any.
+					std::string where = "no written binding";
+					int steps = 0;
+					for (auto it = m_profile_written.upper_bound(vaddr);
+					     it != m_profile_written.begin() && steps++ < 64;) {
+						--it;
+						if (vaddr - it->first < it->second.size) {
+							char text[160];
+							std::snprintf(text, sizeof(text),
+							              "binding 0x%" PRIx64 "+0x%" PRIx64 " shader 0x%016" PRIx64,
+							              it->first, it->second.size, it->second.shader);
+							where = text;
+							break;
+						}
+						if (vaddr - it->first > (512ull << 20)) {
+							break;
+						}
+					}
+					WaitProfile::Event(std::string(is_write ? "write" : "read") +
+					                   " fault in " + where);
+				}
 				if (DownloadBufferMemory<false>(buffer, start, end - start)) {
 					m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
 				}
@@ -546,6 +569,12 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	if (is_written) {
 		m_gpu_modified_ranges.Add(vaddr, size);
 		ForgetColorMetadataChecks(vaddr, size);
+		if (WaitProfile::Enabled()) {
+			auto& binding  = m_profile_written[vaddr];
+			binding.size   = std::max(binding.size, size);
+			binding.shader = WaitProfile::t_last_shader_hash;
+			binding.binds++;
+		}
 	}
 	return {&buffer, buffer.Offset(vaddr)};
 }

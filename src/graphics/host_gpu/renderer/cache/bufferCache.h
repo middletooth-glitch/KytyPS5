@@ -147,6 +147,14 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	// KYTY_WAIT_PROFILE: GPU-written bindings by start address (size, shader, binds), to
+	// attribute CPU faults on GPU-modified memory.
+	struct WrittenBinding {
+		uint64_t size   = 0;
+		uint64_t shader = 0;
+		uint64_t binds  = 0;
+	};
+	std::map<uint64_t, WrittenBinding> m_profile_written;
 	// One per TileManager::ColorClearSlots key slot.
 	std::array<RangeSet, 8>                           m_checked_color_metadata;
 	MemoryTracker                                     m_memory_tracker;

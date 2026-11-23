@@ -31,6 +31,8 @@ inline bool Enabled() {
 
 struct Tag;
 inline thread_local const Tag* t_current = nullptr;
+// Guest hash of the shader whose program was looked up last on this thread (attribution only).
+inline thread_local uint64_t t_last_shader_hash = 0;
 
 struct Tag {
 	const char* name;
@@ -72,11 +74,11 @@ inline void Record(uint64_t ns) {
 }
 
 // An event that is not a wait (counted, with bytes), such as a skipped readback.
-inline void Event(const char* name, uint64_t bytes = 0) {
+inline void Event(const std::string& name, uint64_t bytes = 0) {
 	if (!Enabled()) {
 		return;
 	}
-	Add(std::string("[event] ") + name, 0, bytes);
+	Add("[event] " + name, 0, bytes);
 }
 
 inline void Add(std::string key, uint64_t ns, uint64_t bytes) {
@@ -101,6 +103,9 @@ inline void Add(std::string key, uint64_t ns, uint64_t bytes) {
 		                                  : a.second.count > b.second.count;
 	});
 	LOGF("--- GPU wait profile (%.1f s) ---\n", seconds);
+	if (sorted.size() > 40) {
+		sorted.resize(40);
+	}
 	for (const auto& [name, value]: sorted) {
 		LOGF("  %8.1f ms/s %8.1f /s %8.2f MB/s  %s\n",
 		     static_cast<double>(value.ns) / 1e6 / seconds,
