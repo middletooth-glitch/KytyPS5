@@ -16,6 +16,7 @@
 #include "graphics/host_gpu/renderer/waitProfile.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -155,7 +156,8 @@ void BufferCache::DeleteBuffer(BufferId id) {
 }
 
 template <bool async>
-bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size,
+                                       std::vector<std::function<void()>>* batch) {
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size     = 0;
 	const auto                  buffer_address = buffer.CpuAddress();
@@ -219,6 +221,9 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	};
 	if constexpr (async) {
 		m_scheduler.DeferPriorityOperation(std::move(publish));
+	} else if (batch != nullptr) {
+		// The caller waits once for the batch and runs the publishes.
+		batch->emplace_back(std::move(publish));
 	} else {
 		const auto tick = m_scheduler.CurrentTick();
 		WaitProfile::Tag tag("buffer download (sync)");
@@ -286,6 +291,97 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	QueueBdaSync(vaddr, size);
 }
 
+// Synchronous readback for a CPU access to GPU-modified memory: the download window around the
+// access, plus the hot pages (recent faults elsewhere) that are GPU-modified again, in one GPU
+// wait. Once the GPU has finished everything submitted so far every GPU-modified range is final,
+// so reading the hot pages back now is what their own faults would do later, minus the waits.
+void BufferCache::ReadBackGpuModified(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	static const bool batching = [] {
+		const char* value = std::getenv("KYTY_READBACK_BATCH");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	constexpr int64_t HotLifetimeNs = 2'000'000'000;
+	constexpr size_t  MaxHotPages   = 4096;
+
+	std::vector<std::function<void()>>       publishes;
+	std::vector<std::pair<uint64_t, uint64_t>> unmark;
+	const auto record = [&](Buffer& owner, uint64_t start, uint64_t bytes) {
+		if (DownloadBufferMemory<false>(owner, start, bytes, &publishes)) {
+			unmark.emplace_back(start, bytes);
+		}
+	};
+
+	const auto start =
+	    std::max(Common::AlignDown(vaddr, DownloadWindowSize), buffer.CpuAddress());
+	const auto end = std::min(std::max(start + DownloadWindowSize, vaddr + size),
+	                          buffer.CpuAddress() + buffer.Size());
+	record(buffer, start, end - start);
+
+	uint64_t hot_pages = 0;
+	if (batching) {
+		const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                     std::chrono::steady_clock::now().time_since_epoch())
+		                     .count();
+		const auto page = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+		if (m_hot_readback_pages.size() < MaxHotPages || m_hot_readback_pages.contains(page)) {
+			m_hot_readback_pages[page] = now;
+		}
+		std::vector<uint64_t> pages;
+		for (auto it = m_hot_readback_pages.begin(); it != m_hot_readback_pages.end();) {
+			if (now - it->second > HotLifetimeNs) {
+				it = m_hot_readback_pages.erase(it);
+				continue;
+			}
+			if ((it->first + TRACKER_PAGE_SIZE <= start || it->first >= end) &&
+			    m_memory_tracker.IsRegionGpuModified(it->first, TRACKER_PAGE_SIZE)) {
+				pages.push_back(it->first);
+			}
+			++it;
+		}
+		std::ranges::sort(pages);
+		for (size_t index = 0; index < pages.size();) {
+			// One range per run of adjacent pages inside a single buffer.
+			const auto* owner = m_page_table.Find(pages[index] >> PageTable::kPageBits);
+			if (owner == nullptr || !*owner) {
+				index++;
+				continue;
+			}
+			auto&    hot_buffer = m_slot_buffers[*owner];
+			uint64_t first      = std::max(pages[index], hot_buffer.CpuAddress());
+			uint64_t last       = pages[index] + TRACKER_PAGE_SIZE;
+			index++;
+			while (index < pages.size() && pages[index] == last &&
+			       last < hot_buffer.CpuAddress() + hot_buffer.Size()) {
+				last += TRACKER_PAGE_SIZE;
+				index++;
+			}
+			last = std::min(last, hot_buffer.CpuAddress() + hot_buffer.Size());
+			if (first < last) {
+				record(hot_buffer, first, last - first);
+				hot_pages += (last - first) / TRACKER_PAGE_SIZE;
+			}
+		}
+	}
+	if (publishes.empty()) {
+		return;
+	}
+	if (hot_pages != 0) {
+		WaitProfile::Event("hot pages read back with a fault", hot_pages * TRACKER_PAGE_SIZE);
+	}
+	{
+		const auto       tick = m_scheduler.CurrentTick();
+		WaitProfile::Tag tag("buffer download (sync)");
+		m_scheduler.Wait(tick);
+		m_scheduler.WaitPriorityOperations(tick);
+	}
+	for (auto& publish: publishes) {
+		publish();
+	}
+	for (const auto& [address, bytes]: unmark) {
+		m_memory_tracker.UnmarkRegionAsGpuModified(address, bytes);
+	}
+}
+
 bool BufferCache::SkipReadback(bool is_write) {
 	static const int mode = [] {
 		const char* value = std::getenv("KYTY_READBACK");
@@ -332,10 +428,6 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 				                            : "readback skipped (read fault)",
 				                   end - start);
 			} else {
-				const auto start =
-				    std::max(Common::AlignDown(vaddr, DownloadWindowSize), buffer.CpuAddress());
-				const auto end = std::min(std::max(start + DownloadWindowSize, vaddr + size),
-				                          buffer.CpuAddress() + buffer.Size());
 				WaitProfile::Tag tag(is_write ? "CPU write fault" : "CPU read fault");
 				if (WaitProfile::Enabled()) {
 					// The GPU-written binding that covers the faulting address, if any.
@@ -359,9 +451,7 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 					WaitProfile::Event(std::string(is_write ? "write" : "read") +
 					                   " fault in " + where);
 				}
-				if (DownloadBufferMemory<false>(buffer, start, end - start)) {
-					m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
-				}
+				ReadBackGpuModified(buffer, vaddr, size);
 			}
 		}
 		if (is_write) {

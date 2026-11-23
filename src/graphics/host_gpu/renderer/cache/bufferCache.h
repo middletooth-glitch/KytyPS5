@@ -13,6 +13,8 @@
 
 #include <array>
 #include <map>
+#include <unordered_map>
+#include <functional>
 #include <mutex>
 #include <span>
 #include <utility>
@@ -132,7 +134,13 @@ private:
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
-	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size,
+	                                        std::vector<std::function<void()>>* batch = nullptr);
+	// Pages the CPU faulted on after GPU writes (steady-clock ns of the last fault). A
+	// synchronous readback downloads the GPU-modified ones too, in the same GPU wait, since
+	// games read the same GPU results every frame.
+	std::unordered_map<uint64_t, int64_t> m_hot_readback_pages;
+	void ReadBackGpuModified(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	static bool SkipReadback(bool is_write);
 	void        DiscardGpuModified(uint64_t vaddr, uint64_t size);
 	void               ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size);
