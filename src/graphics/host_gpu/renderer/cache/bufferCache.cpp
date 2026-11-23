@@ -223,7 +223,9 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		m_scheduler.DeferPriorityOperation(std::move(publish));
 	} else if (batch != nullptr) {
 		// The caller waits once for the batch and runs the publishes.
-		batch->emplace_back(std::move(publish));
+		// The publish owns the move-only download mapping; std::function needs a copyable target.
+		auto shared = std::make_shared<decltype(publish)>(std::move(publish));
+		batch->emplace_back([shared] { (*shared)(); });
 	} else {
 		const auto tick = m_scheduler.CurrentTick();
 		WaitProfile::Tag tag("buffer download (sync)");
