@@ -967,6 +967,12 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	}
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
+	const bool known_wave32 = m_graphics.amd_compute_wave32_level != AmdWave32Off &&
+	                          input_info.host_subgroup_size == 64u &&
+	                          m_amd_wave32_hashes.contains(params.hash);
+	if (known_wave32) {
+		input_info.host_subgroup_size = 32u;
+	}
 	ShaderRecompiler::IR::PushData::Window push_data;
 	const auto* module = GetProgram(params, input_info, push_data);
 	if (module != nullptr && module->host_skipped) {
@@ -983,8 +989,7 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	    input_info.host_subgroup_size == 64u &&
 	    AmdNeedsWave32(m_graphics.amd_compute_wave32_level, module->subgroup_features,
 	                   params.hash)) {
-		static std::atomic<uint32_t> logged {0};
-		if (logged.fetch_add(1, std::memory_order_relaxed) < 1024u) {
+		if (m_amd_wave32_hashes.insert(params.hash).second) {
 			LOGF("GetComputeProgram: compute shader hash=0x%016" PRIx64
 			     " runs in wave32 (AMD, features=0x%x)\n",
 			     params.hash, module->subgroup_features);

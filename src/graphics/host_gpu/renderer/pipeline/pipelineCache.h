@@ -25,6 +25,7 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -285,6 +286,9 @@ private:
 	std::unordered_map<ProgramKey, Program, ProgramKeyHash> m_program_cache;
 	// Modules compiled per stage.
 	std::array<uint32_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1> m_compiled {};
+	// Guest compute hashes whose wave64 module runs in wave32 on AMD (AmdNeedsWave32), so later
+	// dispatches look up the wave32 module directly.
+	std::unordered_set<uint64_t> m_amd_wave32_hashes;
 	ProgramKey                             m_lookup_key;
 	vk::PipelineCache             m_driver_cache = nullptr;
 	std::filesystem::path         m_driver_cache_path;
