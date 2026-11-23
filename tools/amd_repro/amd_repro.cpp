@@ -215,8 +215,22 @@ bool     g_specialize = false;
 const bool g_fast = std::getenv("AMD_REPRO_FAST") != nullptr;
 uint32_t g_spec_values[2] {};
 
+// Ends the child on an access violation with exit code 0xA0000000 | (offset in the faulting
+// DLL, 28 bits), so the parent can tell one driver crash site from another.
+LONG CALLBACK ReportFault(EXCEPTION_POINTERS* info) {
+	if (info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+	const auto pc     = reinterpret_cast<uint64_t>(info->ExceptionRecord->ExceptionAddress);
+	HMODULE    module = nullptr;
+	GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+	                   reinterpret_cast<LPCSTR>(pc), &module);
+	const auto offset = pc - reinterpret_cast<uint64_t>(module);
+	TerminateProcess(GetCurrentProcess(), 0xA0000000u | static_cast<UINT>(offset & 0x0fffffffu));
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
 int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format = -1,
              uint32_t image_flags = 0, int op = -1) {
+	AddVectoredExceptionHandler(1, ReportFault);
 	const auto words = ReadSpirv(spv);
 	const auto shader = ParseSpirv(words);
 	if (!shader.compute) {
@@ -834,6 +848,18 @@ int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format =
 
 using Instruction = std::vector<uint32_t>;
 
+// A crash in the driver; with AMD_REPRO_TARGET=<hex offset>, only one at that offset counts.
+bool IsInterestingCrash(DWORD code) {
+	static const long long target = [] {
+		const char* value = std::getenv("AMD_REPRO_TARGET");
+		return value != nullptr ? static_cast<long long>(std::strtoull(value, nullptr, 16)) : -1LL;
+	}();
+	const bool crashed = code == 0xC0000005 || (code & 0xF0000000u) == 0xA0000000u;
+	if (!crashed) return false;
+	if (target < 0) return true;
+	return (code & 0xF0000000u) == 0xA0000000u && static_cast<long long>(code & 0x0fffffffu) == target;
+}
+
 struct Module {
 	std::vector<uint32_t>    header;
 	std::vector<Instruction> instructions;
@@ -864,6 +890,7 @@ struct Reducer {
 	std::filesystem::path     work;
 	std::string               self;
 	uint32_t                  tests = 0;
+	DWORD                     last_code = 0;
 
 	void Analyze() {
 		std::map<uint32_t, Instruction> types;
@@ -946,7 +973,8 @@ struct Reducer {
 		CloseHandle(process.hProcess);
 		CloseHandle(process.hThread);
 		tests++;
-		return code == 0xC0000005;
+		last_code = code;
+		return IsInterestingCrash(code);
 	}
 };
 
@@ -1019,7 +1047,13 @@ std::string Describe(DWORD code) {
 		case 4: return "no Vulkan";
 		case 0xC0000005: return "CRASH (access violation)";
 		case STILL_ACTIVE: return "HUNG (killed after 60 s)";
-		default: std::snprintf(text, sizeof(text), "exit code 0x%08lX", code); return text;
+		default:
+			if ((code & 0xF0000000u) == 0xA0000000u) {
+				std::snprintf(text, sizeof(text), "CRASH at +0x%lX", code & 0x0fffffffu);
+				return text;
+			}
+			std::snprintf(text, sizeof(text), "exit code 0x%08lX", code);
+			return text;
 	}
 }
 
@@ -1039,6 +1073,34 @@ int main(int argc, char** argv) {
 		                image_format, image_flags, op);
 	}
 	if (argc >= 3 && std::strcmp(argv[1], "--reduce") == 0) return Reduce(argv[2]);
+	// amd_repro.exe --where <folder>: where in the driver each .spv there crashes.
+	if (argc >= 3 && std::strcmp(argv[1], "--where") == 0) {
+		SetEnvironmentVariableA("AMD_REPRO_FAST", "1");
+		std::vector<std::filesystem::path> files;
+		for (const auto& e: std::filesystem::directory_iterator(argv[2]))
+			if (e.path().extension() == ".spv" && e.path().string().find(".probe.") == std::string::npos)
+				files.push_back(e.path());
+		std::sort(files.begin(), files.end());
+		std::ofstream out(std::filesystem::path(argv[2]) / "amd_repro_where.txt");
+		for (const auto& f: files) {
+			Reducer r;
+			r.module = SplitSpirv(ReadSpirv(f));
+			r.work   = f.parent_path();
+			char me[MAX_PATH];
+			GetModuleFileNameA(nullptr, me, MAX_PATH);
+			r.self = me;
+			r.Analyze();
+			std::vector<bool> none(r.candidates.size(), false);
+			r.Crashes(none, (f.filename().string() + ".probe.spv").c_str());
+			char line[400];
+			std::snprintf(line, sizeof(line), "%-40s %s", f.filename().string().c_str(), Describe(r.last_code).c_str());
+			std::printf("%s\n", line);
+			std::fflush(stdout);
+			out << line << "\n";
+			out.flush();
+		}
+		return 0;
+	}
 	// Interestingness test for spirv-reduce: exit 0 when the driver crashes on the shader.
 	if (argc >= 3 && std::strcmp(argv[1], "--interesting") == 0) {
 		SetEnvironmentVariableA("AMD_REPRO_FAST", "1");
