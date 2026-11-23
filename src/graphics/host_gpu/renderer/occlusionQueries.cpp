@@ -2,6 +2,7 @@
 
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/renderer/waitProfile.h"
 
 #include <algorithm>
 
@@ -54,6 +55,7 @@ void OcclusionQueries::Dump(uint64_t address) {
 
 void OcclusionQueries::PublishDumps() {
 	if (const auto last = m_dumps.back().queries; last != m_read) {
+		WaitProfile::Tag tag("occlusion queries");
 		m_scheduler.Wait(m_dumps.back().tick);
 		// The unread queries wrap around the pool at most once.
 		for (uint64_t read = m_read; read < last;) {

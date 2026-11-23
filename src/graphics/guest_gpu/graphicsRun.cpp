@@ -19,6 +19,7 @@
 #include "graphics/shader/shader.h"
 #include "kernel/memory.h"
 #include "libs/errno.h"
+#include "graphics/host_gpu/renderer/waitProfile.h"
 
 #include <algorithm>
 #include <array>
@@ -231,6 +232,7 @@ void CommandProcessor::BufferFlush() {
 
 void CommandProcessor::BufferWait() {
 	BufferInit();
+	WaitProfile::Tag tag("cp.buffer_wait");
 	GetScheduler().Finish();
 }
 
@@ -966,7 +968,10 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 		case 3: data = Sync::ReadReferenceClock(); [[fallthrough]];
 		case 2: write_label(&data, sizeof(data)); break;
 		case 5: {
-			GetScheduler().Finish();
+			{
+				WaitProfile::Tag tag("cp.release_mem gds");
+				GetScheduler().Finish();
+			}
 			const auto gds = static_cast<uint32_t>(data);
 			Sync::ReadGds(*m_renderer.GetBufferCache().GetGdsBuffer(),
 			              static_cast<uint32_t*>(address), gds & 0xffffu, gds >> 16u);

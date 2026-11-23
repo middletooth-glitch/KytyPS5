@@ -4,6 +4,7 @@
 #include "common/debugCounters.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/trace3d.h"
+#include "graphics/host_gpu/renderer/waitProfile.h"
 
 #include <algorithm>
 #include <optional>
@@ -152,7 +153,10 @@ void CommandScheduler::Finish() {
 	if (!m_command.IsInvalid()) {
 		Submit();
 	}
-	m_master.Wait(CurrentTick() - 1);
+	{
+		WaitProfile::Tag tag("scheduler.finish");
+		m_master.Wait(CurrentTick() - 1);
+	}
 	BeginNext();
 	PopPendingOperations();
 }
@@ -166,6 +170,7 @@ void CommandScheduler::Wait(uint64_t tick) {
 		// resources are released only at the next GPU operation boundary.
 		const auto submitted_tick = Submit();
 		EXIT_IF(submitted_tick != tick);
+		WaitProfile::Tag tag("submit current");
 		m_master.Wait(tick);
 		BeginNext();
 	} else {
@@ -238,7 +243,10 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 			m_priority_operations.pop();
 			m_priority_active_tick = operation.tick;
 		}
-		m_master.Wait(operation.tick);
+		{
+			WaitProfile::Tag tag("priority thread (background)");
+			m_master.Wait(operation.tick);
+		}
 		if (!stop.stop_requested()) {
 			RunOperation(std::move(operation.callback));
 		}

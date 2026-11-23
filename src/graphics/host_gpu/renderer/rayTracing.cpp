@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "kernel/memory.h"
+#include "graphics/host_gpu/renderer/waitProfile.h"
 
 #include <algorithm>
 #include <bit>
@@ -397,6 +398,7 @@ vk::DeviceAddress RayTracing::Prepare(uint64_t tlas) {
 	// every area from it.
 	const auto busy = [&](const Area& area) { return area.tick != 0 && area.tlas == tlas; };
 	if (m_areas[m_next_area].tick != 0 && std::ranges::none_of(m_areas, busy)) {
+		WaitProfile::Tag tag("ray tracing readback");
 		m_scheduler.Wait(m_areas[m_next_area].tick);
 		Collect();
 	}

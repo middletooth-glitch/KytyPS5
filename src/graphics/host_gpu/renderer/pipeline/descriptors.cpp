@@ -200,6 +200,19 @@ static void ValidateSampledDepthBinding(const ShaderRecompiler::IR::ImageResourc
 	if (resource_ok && encoding_ok && view_ok) {
 		return;
 	}
+	// The host image holds the depth values the GPU rendered, already decompressed, so a metadata
+	// encoding we do not model only matters for data the CPU wrote. Sample it rather than stop
+	// (Demon's Souls PPSA01341 samples a depth target through a DCC-style descriptor).
+	if (resource_ok && view_ok) {
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 8u) {
+			LOGF("Sampled depth image with an unmodeled metadata encoding: addr=0x%016" PRIx64
+			     " dword6=0x%08x tile=%u; sampling the host image\n",
+			     descriptor.Base40(), descriptor.fields[6],
+			     static_cast<uint32_t>(descriptor.TileMode()));
+		}
+		return;
+	}
 	const auto descriptor_pitch =
 	    TileGetTexturePitch(descriptor.Format(), static_cast<uint32_t>(descriptor.Width5()) + 1u,
 	                        descriptor.TileMode());
