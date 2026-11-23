@@ -524,6 +524,12 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	    (subgroup_stages & vk::ShaderStageFlagBits::eCompute) &&
 	    subgroup_control.minSubgroupSize <= 64 && subgroup_control.maxSubgroupSize >= 64;
 
+	if (const char* value = std::getenv("KYTY_COMPUTE_WAVE32");
+	    value != nullptr && std::strcmp(value, "1") == 0 && graphics.compute_subgroup_size_control_enabled &&
+	    graphics.min_subgroup_size <= 32u && graphics.max_subgroup_size >= 32u) {
+		graphics.force_compute_wave32 = true;
+		LOGF("Vulkan subgroup: compute forced to wave32 (KYTY_COMPUTE_WAVE32=1)\n");
+	}
 	LOGF("Vulkan subgroup: default=%u min=%u max=%u stages=0x%08x size_control=%s wave64=%s\n",
 	     graphics.subgroup_size, graphics.min_subgroup_size, graphics.max_subgroup_size,
 	     static_cast<vk::ShaderStageFlags::MaskType>(subgroup_stages),

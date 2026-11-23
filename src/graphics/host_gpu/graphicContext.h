@@ -29,6 +29,9 @@ struct GraphicContext {
 	VmaAllocator                       allocator                             = nullptr;
 	bool                               memory_budget_ext_enabled             = false;
 	bool                               compute_subgroup_size_control_enabled = false;
+	// KYTY_COMPUTE_WAVE32=1: compute shaders run in 32-lane subgroups (the wave64 emulation path),
+	// which avoids AMD driver crashes compiling wave64 lane shuffles.
+	bool force_compute_wave32 = false;
 	bool                               shader_image_int64_atomics_enabled    = false;
 	bool                               attachment_feedback_loop_enabled      = false;
 	bool                               provoking_vertex_last_enabled         = false;
@@ -97,7 +100,7 @@ struct GraphicContext {
 	}
 
 	[[nodiscard]] bool SupportsComputeWave64() const noexcept {
-		return subgroup_size == 64u || compute_subgroup_size_control_enabled;
+		return !force_compute_wave32 && (subgroup_size == 64u || compute_subgroup_size_control_enabled);
 	}
 
 	[[nodiscard]] vk::DeviceSize StorageMinAlignment() const {

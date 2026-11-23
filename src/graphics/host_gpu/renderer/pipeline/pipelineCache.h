@@ -115,7 +115,7 @@ static_assert(std::has_unique_object_representations_v<GraphicsPipelineKey>);
 
 // A compiled stage with what pipeline creation needs from it besides the key.
 // Compute shaders whose dispatches are dropped and that never reach the driver
-// (KYTY_SKIP_CS_HASHES, KYTY_AMD_3D_STORAGE_WRITES; see pipelineCache.cpp).
+// (KYTY_SKIP_CS_HASHES, KYTY_AMD_3D_SKIP; see pipelineCache.cpp).
 bool IsSkippedComputeShader(uint64_t hash, uint32_t vendor_id);
 bool IsHostSkippedShader(const ShaderRecompiler::IR::CompiledShaderInfo& info, uint32_t vendor_id);
 bool UsesImage3D(const ShaderRecompiler::IR::CompiledShaderInfo& info);
