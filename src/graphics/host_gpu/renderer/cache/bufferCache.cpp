@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -284,6 +285,26 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	QueueBdaSync(vaddr, size);
 }
 
+bool BufferCache::SkipReadback(bool is_write) {
+	static const int mode = [] {
+		const char* value = std::getenv("KYTY_READBACK");
+		if (value == nullptr) return 0;
+		if (std::strcmp(value, "writes") == 0) return 1;
+		if (std::strcmp(value, "off") == 0) return 2;
+		return 0;
+	}();
+	return mode == 2 || (mode == 1 && is_write);
+}
+
+// Forgets the GPU-modified state of a range without reading it back.
+void BufferCache::DiscardGpuModified(uint64_t vaddr, uint64_t size) {
+	m_memory_tracker.ForEachDownloadRange<false>(
+	    vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
+		    m_gpu_modified_ranges.Subtract(address, bytes);
+		    ForgetColorMetadataChecks(address, bytes);
+	    });
+}
+
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
 		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
@@ -296,12 +317,28 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		}
 		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 		if (IsRegionGpuModified(vaddr, size)) {
-			const auto start =
-			    std::max(Common::AlignDown(vaddr, DownloadWindowSize), buffer.CpuAddress());
-			const auto end = std::min(std::max(start + DownloadWindowSize, vaddr + size),
-			                          buffer.CpuAddress() + buffer.Size());
-			if (DownloadBufferMemory<false>(buffer, start, end - start)) {
+			// Experiment (KYTY_READBACK): skip the GPU readback for the faulting page and let the
+			// CPU see guest memory as it is. "writes" skips it for CPU writes only, "off" for
+			// reads too. Faster (no GPU sync), but the CPU can see stale GPU results.
+			if (SkipReadback(is_write)) {
+				const auto page  = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+				const auto start = std::max(page, buffer.CpuAddress());
+				const auto end   = std::min(page + TRACKER_PAGE_SIZE,
+				                            buffer.CpuAddress() + buffer.Size());
+				DiscardGpuModified(start, end - start);
 				m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
+				WaitProfile::Event(is_write ? "readback skipped (write fault)"
+				                            : "readback skipped (read fault)",
+				                   end - start);
+			} else {
+				const auto start =
+				    std::max(Common::AlignDown(vaddr, DownloadWindowSize), buffer.CpuAddress());
+				const auto end = std::min(std::max(start + DownloadWindowSize, vaddr + size),
+				                          buffer.CpuAddress() + buffer.Size());
+				WaitProfile::Tag tag(is_write ? "CPU write fault" : "CPU read fault");
+				if (DownloadBufferMemory<false>(buffer, start, end - start)) {
+					m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
+				}
 			}
 		}
 		if (is_write) {

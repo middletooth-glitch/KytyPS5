@@ -133,6 +133,8 @@ private:
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	static bool SkipReadback(bool is_write);
+	void        DiscardGpuModified(uint64_t vaddr, uint64_t size);
 	void               ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size);
 
 	GraphicContext&                                   m_graphics;

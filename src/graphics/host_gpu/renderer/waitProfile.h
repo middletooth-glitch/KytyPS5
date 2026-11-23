@@ -44,8 +44,12 @@ struct Tag {
 struct Totals {
 	uint64_t count = 0;
 	uint64_t ns    = 0;
+	uint64_t bytes = 0;
 };
 
+inline void Add(std::string key, uint64_t ns, uint64_t bytes);
+
+// A blocking wait of ns nanoseconds, attributed to the active tags.
 inline void Record(uint64_t ns) {
 	if (!Enabled()) {
 		return;
@@ -64,6 +68,18 @@ inline void Record(uint64_t ns) {
 			key += *it;
 		}
 	}
+	Add(std::move(key), ns, 0);
+}
+
+// An event that is not a wait (counted, with bytes), such as a skipped readback.
+inline void Event(const char* name, uint64_t bytes = 0) {
+	if (!Enabled()) {
+		return;
+	}
+	Add(std::string("[event] ") + name, 0, bytes);
+}
+
+inline void Add(std::string key, uint64_t ns, uint64_t bytes) {
 	static std::mutex                              mutex;
 	static std::unordered_map<std::string, Totals> totals;
 	static auto next_report = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -72,6 +88,7 @@ inline void Record(uint64_t ns) {
 	auto& entry = totals[key];
 	entry.count++;
 	entry.ns += ns;
+	entry.bytes += bytes;
 	const auto now = std::chrono::steady_clock::now();
 	if (now < next_report) {
 		return;
@@ -79,11 +96,16 @@ inline void Record(uint64_t ns) {
 	const double seconds =
 	    std::chrono::duration<double>(now - window_start).count();
 	std::vector<std::pair<std::string, Totals>> sorted(totals.begin(), totals.end());
-	std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
+	std::ranges::sort(sorted, [](const auto& a, const auto& b) {
+		return a.second.ns != b.second.ns ? a.second.ns > b.second.ns
+		                                  : a.second.count > b.second.count;
+	});
 	LOGF("--- GPU wait profile (%.1f s) ---\n", seconds);
 	for (const auto& [name, value]: sorted) {
-		LOGF("  %8.1f ms/s %8.1f waits/s  %s\n", static_cast<double>(value.ns) / 1e6 / seconds,
-		     static_cast<double>(value.count) / seconds, name.c_str());
+		LOGF("  %8.1f ms/s %8.1f /s %8.2f MB/s  %s\n",
+		     static_cast<double>(value.ns) / 1e6 / seconds,
+		     static_cast<double>(value.count) / seconds,
+		     static_cast<double>(value.bytes) / 1048576.0 / seconds, name.c_str());
 	}
 	totals.clear();
 	window_start = now;
