@@ -365,6 +365,17 @@ static vk::Format StorageViewFormat(const ShaderRecompiler::IR::ImageResource& r
 	return SrgbUnormViewFormat(pixel_format);
 }
 
+static void LogOutOfBoundsView(const char* what, uint32_t value, uint32_t limit,
+                               const ShaderTextureResource& descriptor) {
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 16u) {
+		LOGF("Texture view %s out of bounds (%u, limit %u), clamped: address=0x%016" PRIx64
+		     " base_level=%u last_level=%u base_array=%u\n",
+		     what, value, limit, descriptor.Base40(), descriptor.BaseLevel(),
+		     descriptor.LastLevel(), descriptor.BaseArray5());
+	}
+}
+
 static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& resource,
                                      const ShaderTextureResource& descriptor, vk::Format format,
                                      const SurfaceFormatInfo& surface_format, bool storage,
@@ -374,13 +385,15 @@ static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& 
 	view.aspect      = vk::ImageAspectFlagBits::eColor;
 	view.base_level  = descriptor.BaseLevel();
 	view.level_count = view_levels;
-	if (descriptor.MinLod() > descriptor.LastLevel() * 256u) {
-		EXIT("texture minimum LOD exceeds last mip level: min_lod=%u last_level=%u\n",
-		     descriptor.MinLod(), descriptor.LastLevel());
+	// A minimum LOD past the last level is clamped to it (the hardware clamps the LOD).
+	auto min_lod = descriptor.MinLod();
+	if (min_lod > descriptor.LastLevel() * 256u) {
+		LogOutOfBoundsView("minimum LOD", min_lod, descriptor.LastLevel() * 256u, descriptor);
+		min_lod = descriptor.LastLevel() * 256u;
 	}
 	const auto base_lod = view.base_level * 256u;
-	if (descriptor.MinLod() > base_lod) {
-		view.min_lod = descriptor.MinLod() - base_lod;
+	if (min_lod > base_lod) {
+		view.min_lod = min_lod - base_lod;
 	}
 	view.usage = storage ? vk::ImageUsageFlagBits::eStorage : vk::ImageUsageFlagBits::eSampled;
 	view.mapping =
@@ -399,7 +412,9 @@ static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& 
 			view.type       = vk::ImageViewType::e2DArray;
 			view.base_layer = descriptor.BaseArray5();
 			if (view.base_layer >= image_layers) {
-				EXIT("texture array base layer is out of bounds\n");
+				// Clamped to the last layer instead of exiting.
+				LogOutOfBoundsView("base layer", view.base_layer, image_layers, descriptor);
+				view.base_layer = image_layers - 1u;
 			}
 			view.layer_count = image_layers - view.base_layer;
 			break;
@@ -409,7 +424,9 @@ static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& 
 			view.type       = vk::ImageViewType::e2D;
 			view.base_layer = descriptor.BaseArray5();
 			if (view.base_layer >= image_layers) {
-				EXIT("texture base layer is out of bounds\n");
+				// Clamped to the last layer instead of exiting.
+				LogOutOfBoundsView("base layer", view.base_layer, image_layers, descriptor);
+				view.base_layer = image_layers - 1u;
 			}
 			view.layer_count = 1;
 			break;

@@ -282,7 +282,8 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 			module.host_subgroup_size = workgroup->host_subgroup_size;
 		}
 	}
-	module.amd_wave64_crash_pattern = HasAmdWave64CrashPattern(result.spirv);
+	module.subgroup_features = SpirvSubgroupFeatures(result.spirv);
+	module.guest_hash        = key.hash;
 	if (uses_3d) {
 		TRACE3D("%s shader module hash=0x%016" PRIx64 " end\n", stage, key.hash);
 	}
@@ -892,21 +893,57 @@ bool IsHostSkippedShader(const ShaderRecompiler::IR::CompiledShaderInfo& info, u
 	return UsesImage3D(info);
 }
 
-bool HasAmdWave64CrashPattern(std::span<const uint32_t> spirv) {
-	// SPIR-V opcodes: OpGroupNonUniformShuffle, OpGroupNonUniformBallotBitExtract, OpLoopMerge.
-	constexpr uint32_t OpShuffle = 345u, OpBallotBitExtract = 341u, OpLoopMerge = 246u;
-	bool               shuffle = false, bit_extract = false, loop = false;
+uint32_t SpirvSubgroupFeatures(std::span<const uint32_t> spirv) {
+	// SPIR-V opcodes: OpGroupNonUniformElect .. OpGroupNonUniformQuadSwap,
+	// OpGroupNonUniformShuffle .. ShuffleDown, OpGroupNonUniformBallotBitExtract, OpLoopMerge.
+	constexpr uint32_t OpFirstGroup = 333u, OpLastGroup = 366u;
+	constexpr uint32_t OpFirstShuffle = 345u, OpLastShuffle = 348u;
+	constexpr uint32_t OpBallotBitExtract = 341u, OpLoopMerge = 246u;
+	uint32_t           features = 0;
 	for (size_t i = 5; i < spirv.size();) {
 		const uint32_t op = spirv[i] & 0xffffu, count = spirv[i] >> 16u;
 		if (count == 0) {
 			break;
 		}
-		shuffle |= op == OpShuffle;
-		bit_extract |= op == OpBallotBitExtract;
-		loop |= op == OpLoopMerge;
+		if (op >= OpFirstGroup && op <= OpLastGroup) features |= SubgroupAny;
+		if (op >= OpFirstShuffle && op <= OpLastShuffle) features |= SubgroupShuffle;
+		if (op == OpBallotBitExtract) features |= SubgroupBallotBitExtract;
+		if (op == OpLoopMerge) features |= SubgroupLoop;
 		i += count;
 	}
-	return shuffle && bit_extract && loop;
+	return features;
+}
+
+static std::vector<uint64_t> ParseHashList(const char* name) {
+	std::vector<uint64_t> list;
+	const char*           cursor = std::getenv(name);
+	while (cursor != nullptr && *cursor != '\0') {
+		char*      end   = nullptr;
+		const auto value = std::strtoull(cursor, &end, 16);
+		if (end == cursor) {
+			cursor++;
+			continue;
+		}
+		if (value != 0) {
+			list.push_back(value);
+		}
+		cursor = end;
+	}
+	return list;
+}
+
+bool AmdNeedsWave32(uint32_t level, uint32_t features, uint64_t guest_hash) {
+	static const auto wave32 = ParseHashList("KYTY_WAVE32_HASHES");
+	static const auto wave64 = ParseHashList("KYTY_WAVE64_HASHES");
+	if (std::ranges::find(wave32, guest_hash) != wave32.end()) return true;
+	if (std::ranges::find(wave64, guest_hash) != wave64.end()) return false;
+	constexpr uint32_t Pattern = SubgroupShuffle | SubgroupBallotBitExtract | SubgroupLoop;
+	switch (level) {
+		case AmdWave32Pattern: return (features & Pattern) == Pattern;
+		case AmdWave32Shuffle: return (features & SubgroupShuffle) != 0;
+		case AmdWave32Subgroup: return (features & SubgroupAny) != 0;
+		default: return false;
+	}
 }
 
 bool UsesImage3D(const ShaderRecompiler::IR::CompiledShaderInfo& info) {
@@ -942,13 +979,15 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 		return nullptr;
 	}
 	// AMD: a wave64 module its driver would crash on is emitted again for 32-lane subgroups.
-	if (module != nullptr && m_graphics.amd_compute_wave32_fallback &&
-	    input_info.host_subgroup_size == 64u && module->amd_wave64_crash_pattern) {
+	if (module != nullptr && m_graphics.amd_compute_wave32_level != AmdWave32Off &&
+	    input_info.host_subgroup_size == 64u &&
+	    AmdNeedsWave32(m_graphics.amd_compute_wave32_level, module->subgroup_features,
+	                   params.hash)) {
 		static std::atomic<uint32_t> logged {0};
-		if (logged.fetch_add(1, std::memory_order_relaxed) < 64u) {
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 1024u) {
 			LOGF("GetComputeProgram: compute shader hash=0x%016" PRIx64
-			     " runs in wave32 (AMD wave64 crash pattern)\n",
-			     params.hash);
+			     " runs in wave32 (AMD, features=0x%x)\n",
+			     params.hash, module->subgroup_features);
 		}
 		input_info.host_subgroup_size = 32u;
 		ShaderRecompiler::IR::PushData::Window wave32_push_data;

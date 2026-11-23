@@ -81,10 +81,11 @@ template <class S, class Key> void IoKey(S& io, Key& key) {
 
 template <class S, class Module> void IoModule(S& io, Module& stage) {
 	// The handle comes from the SPIR-V; stored programs have no function code.
-	// host_skipped and amd_wave64_crash_pattern are recomputed at load time.
+	// host_skipped and subgroup_features are recomputed at load time.
 	auto& [id, handle, info, specialization, function_code, rect_parameters, mesh_task,
-	       host_skipped, host_subgroup_size, amd_wave64_crash_pattern] = stage;
-	IoAll(io, id, info, specialization, rect_parameters, mesh_task, host_subgroup_size);
+	       host_skipped, host_subgroup_size, subgroup_features, guest_hash] = stage;
+	IoAll(io, id, info, specialization, rect_parameters, mesh_task, host_subgroup_size,
+	      guest_hash);
 }
 
 } // namespace
@@ -181,10 +182,11 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	}
 	// A compute pipeline depends only on its module.
 	for (const auto* module: modules | std::views::values) {
-		// A wave64 module with the AMD crash pattern is never given a pipeline there.
-		const bool amd_crash = m_graphics.amd_compute_wave32_fallback &&
-		                       module != nullptr && module->amd_wave64_crash_pattern &&
-		                       module->host_subgroup_size == 64u;
+		// A wave64 module that runs in wave32 on AMD is never given a pipeline there.
+		const bool amd_crash = m_graphics.amd_compute_wave32_level != AmdWave32Off &&
+		                       module != nullptr && module->host_subgroup_size == 64u &&
+		                       AmdNeedsWave32(m_graphics.amd_compute_wave32_level,
+		                                      module->subgroup_features, module->guest_hash);
 		if (module != nullptr && module->info.stage == ShaderType::Compute &&
 		    !module->host_skipped && !amd_crash) {
 			jobs.emplace_back([this, module, &pipeline = m_compute_pipelines[module->id]] {
@@ -253,7 +255,7 @@ bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
 			}
 			module.host_skipped =
 			    IsHostSkippedShader(module.info, m_graphics.GetPhysicalDeviceProperties().vendorID);
-			module.amd_wave64_crash_pattern = HasAmdWave64CrashPattern(spirv);
+			module.subgroup_features = SpirvSubgroupFeatures(spirv);
 			if (!module.host_skipped) {
 				module.module = CompileSPV(spirv, m_graphics.device);
 			}

@@ -32,9 +32,9 @@ struct GraphicContext {
 	// KYTY_COMPUTE_WAVE32=1: compute shaders run in 32-lane subgroups (the wave64 emulation path),
 	// which avoids AMD driver crashes compiling wave64 lane shuffles.
 	bool force_compute_wave32 = false;
-	// AMD default: compute stays wave64, and only shaders with HasAmdWave64CrashPattern are
-	// emitted for 32-lane subgroups.
-	bool amd_compute_wave32_fallback = false;
+	// AMD default: compute stays wave64, and only shaders that AmdNeedsWave32 selects at this
+	// level are emitted for 32-lane subgroups (0: none, AmdWave32Level in pipelineCache.h).
+	uint32_t amd_compute_wave32_level = 0;
 	bool                               shader_image_int64_atomics_enabled    = false;
 	bool                               attachment_feedback_loop_enabled      = false;
 	bool                               provoking_vertex_last_enabled         = false;

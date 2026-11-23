@@ -538,9 +538,20 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 			LOGF("Vulkan subgroup: all compute runs in wave32 (KYTY_COMPUTE_WAVE32=1)\n");
 		} else if (value == nullptr && can_wave32 &&
 		           graphics.physical_device_properties.vendorID == AmdVendorId) {
-			graphics.amd_compute_wave32_fallback = true;
-			LOGF("Vulkan subgroup: AMD GPU, compute shaders with lane-shuffle loops run in "
-			     "wave32\n");
+			// KYTY_AMD_WAVE32=pattern (default) | shuffle | subgroup | off
+			const char* level = std::getenv("KYTY_AMD_WAVE32");
+			const char* name  = level != nullptr ? level : "pattern";
+			if (std::strcmp(name, "shuffle") == 0) {
+				graphics.amd_compute_wave32_level = 2u;
+			} else if (std::strcmp(name, "subgroup") == 0) {
+				graphics.amd_compute_wave32_level = 3u;
+			} else if (std::strcmp(name, "off") == 0) {
+				graphics.amd_compute_wave32_level = 0u;
+			} else {
+				graphics.amd_compute_wave32_level = 1u;
+				name                              = "pattern";
+			}
+			LOGF("Vulkan subgroup: AMD GPU, wave32 for compute shaders selected by '%s'\n", name);
 		}
 	}
 	LOGF("Vulkan subgroup: default=%u min=%u max=%u stages=0x%08x size_control=%s wave64=%s\n",

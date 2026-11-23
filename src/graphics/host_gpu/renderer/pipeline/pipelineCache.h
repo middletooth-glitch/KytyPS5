@@ -134,14 +134,31 @@ struct ShaderModule {
 	bool                                         host_skipped = false;
 	// Compute: the host subgroup size the SPIR-V was emitted for (32 or 64); 0 for other stages.
 	uint32_t                                     host_subgroup_size = 0;
-	// SPIR-V with the lane-shuffle pattern that AMD's driver crashes on in wave64
-	// (HasAmdWave64CrashPattern); recomputed from the SPIR-V, not stored.
-	bool                                         amd_wave64_crash_pattern = false;
+	// SpirvSubgroupFeatures of the SPIR-V; recomputed at load time, not stored.
+	uint32_t                                     subgroup_features = 0;
+	// Guest shader hash (compute), for the per-hash wave overrides.
+	uint64_t                                     guest_hash = 0;
 };
 
-// Lane shuffles, ballot bit tests and a loop in one module: AMD's Windows driver (amdvlk64.dll)
-// crashes building a wave64 pipeline for such code (Demon's Souls CS 0x3bcd5b00b85a5447).
-bool HasAmdWave64CrashPattern(std::span<const uint32_t> spirv);
+enum SpirvSubgroupFeature : uint32_t {
+	SubgroupShuffle          = 1u << 0u, // OpGroupNonUniformShuffle*
+	SubgroupBallotBitExtract = 1u << 1u, // OpGroupNonUniformBallotBitExtract
+	SubgroupLoop             = 1u << 2u, // OpLoopMerge
+	SubgroupAny              = 1u << 3u, // any OpGroupNonUniform* instruction
+};
+uint32_t SpirvSubgroupFeatures(std::span<const uint32_t> spirv);
+
+// Which wave64 compute shaders run in wave32 on AMD (KYTY_AMD_WAVE32).
+enum AmdWave32Level : uint32_t {
+	AmdWave32Off = 0,
+	// Lane shuffles, ballot bit tests and a loop: AMD's Windows driver (amdvlk64.dll) crashes
+	// building a wave64 pipeline for such code (Demon's Souls CS 0x3bcd5b00b85a5447).
+	AmdWave32Pattern  = 1,
+	AmdWave32Shuffle  = 2, // any lane shuffle
+	AmdWave32Subgroup = 3, // any subgroup operation
+};
+// KYTY_WAVE32_HASHES / KYTY_WAVE64_HASHES override the level for single guest hashes.
+bool AmdNeedsWave32(uint32_t level, uint32_t subgroup_features, uint64_t guest_hash);
 
 // A draw's depth target and its first color_count color targets.
 struct DrawTargets {
