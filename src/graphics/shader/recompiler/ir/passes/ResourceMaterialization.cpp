@@ -8,6 +8,7 @@
 #include "graphics/shader/shaderBindings.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <bit>
 #include <cstdio>
@@ -22,8 +23,11 @@ namespace {
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
 
 bool SpecializationFail(std::string_view message) {
-	std::fprintf(stderr, "shader resource specialization failed: %.*s\n",
-	             static_cast<int>(message.size()), message.data());
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 32u) {
+		std::fprintf(stderr, "shader resource specialization failed: %.*s\n",
+		             static_cast<int>(message.size()), message.data());
+	}
 	return false;
 }
 
@@ -1158,9 +1162,17 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			     !unfiltered_coordinates && !prefix_coordinates) ||
 			    image.conversion_format != image_class.conversion_format ||
 			    (!storage_swizzle && image.shader_swizzle != image_class.shader_swizzle)) {
-				return SpecializationFail(
-				    fmt::format("indirect image table at pc 0x{:08x} has incompatible candidates",
-				                program.info.images[root_index].first_use_pc));
+				return SpecializationFail(fmt::format(
+				    "indirect image table at pc 0x{:08x} has incompatible candidates: "
+				    "dim {}/{} cube {}/{} conversion {}/{} swizzle 0x{:x}/0x{:x} base dim {}",
+				    program.info.images[root_index].first_use_pc,
+				    static_cast<uint32_t>(image.dimension),
+				    static_cast<uint32_t>(image_class.dimension), image.cube ? 1 : 0,
+				    image_class.cube ? 1 : 0, static_cast<uint32_t>(image.conversion_format),
+				    static_cast<uint32_t>(image_class.conversion_format),
+				    static_cast<uint32_t>(image.shader_swizzle),
+				    static_cast<uint32_t>(image_class.shader_swizzle),
+				    static_cast<uint32_t>(base.dimension)));
 			}
 		}
 	}

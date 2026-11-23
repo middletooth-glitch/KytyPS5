@@ -212,11 +212,16 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 	return revision != call_source->revision;
 }
 
+bool PipelineCache::Program::Materialize(const ShaderRecompiler::IR::SrtRuntime& runtime) {
+	return ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
+	                                                  specialization);
+}
+
+// Resources must be materialized (Program::Materialize) for this call.
 template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
                                                  ShaderRecompiler::IR::PushData::Window push_data) {
-	EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
-	                                                    specialization));
+	(void)runtime;
 	for (auto& candidate: modules) {
 		const auto& layout = candidate.info.bindings;
 		if (layout.push_data_start_dword !=
@@ -353,6 +358,19 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		module.info.bindings.AdvancePushData(push_data, module.info.stage);
 		return &module;
 	};
+	// Bound descriptors the recompiler cannot specialize drop this draw or dispatch instead of
+	// stopping the emulator (Demon's Souls PPSA01341: an indirect image table that mixes
+	// incompatible texture types).
+	const auto drop = [&] {
+		input_info.stage = {};
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 32u) {
+			LOGF("GetProgram: dropping a %s call of shader hash=0x%016" PRIx64
+			     ": its resources cannot be specialized\n",
+			     ShaderRecompiler::StageName(options.stage), params.hash);
+		}
+		return nullptr;
+	};
 	bool source_changed = false;
 	if (entry != m_program_cache.end()) {
 		auto& cached = entry->second;
@@ -360,8 +378,12 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		ShaderModule* module = nullptr;
 		if (cached.call_source) {
 			source_changed = cached.RefreshCallSource(runtime);
-			if (!source_changed) module = cached.FindModule<true>(runtime, push_data);
+			if (!source_changed) {
+				if (!cached.Materialize(runtime)) return drop();
+				module = cached.FindModule<true>(runtime, push_data);
+			}
 		} else {
+			if (!cached.Materialize(runtime)) return drop();
 			module = cached.FindModule<false>(runtime, push_data);
 		}
 		if (module != nullptr) return bind(*module);
@@ -407,10 +429,10 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		    .resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program),
 		}).first;
 		auto& program = entry->second;
-		EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-		    program.resource_plan, runtime, program.resources, program.specialization));
+		if (!program.Materialize(runtime)) return drop();
 	} else if (source_changed) {
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+		if (!entry->second.Materialize(runtime)) return drop();
 		if (const auto* module = entry->second.FindModule<true>(runtime, push_data)) {
 			return bind(*module);
 		}
@@ -826,8 +848,19 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	ShaderRecompiler::IR::PushData::Window push_data {
 	    .begin = ShaderRecompiler::IR::PushData::GraphicsDrawDwords(mesh_active, object_primitive_id,
 	                                                                last_stage.user_clip_planes)};
+	// A stage whose resources cannot be specialized drops the draw (no vertex module).
+	const auto drop_draw = [&] {
+		for (auto& stage: vertex_info) {
+			stage.stage = {};
+		}
+	};
 	if (pixel_active) {
-		const auto& pixel_module = *GetProgram(pixel_params, pixel_info, push_data);
+		const auto* pixel_program = GetProgram(pixel_params, pixel_info, push_data);
+		if (pixel_program == nullptr) {
+			drop_draw();
+			return;
+		}
+		const auto& pixel_module = *pixel_program;
 		for (const auto& output: pixel_module.info.info.outputs) {
 			if (output.kind == ShaderRecompiler::IR::StageOutputKind::Mrt ||
 			    output.kind == ShaderRecompiler::IR::StageOutputKind::ObjectPrimitiveId) {
@@ -837,7 +870,10 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 		state.mrt_mask &= color_output_mask;
 	}
 	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
-		GetProgram(vertex_params[i], vertex_info[i], push_data);
+		if (GetProgram(vertex_params[i], vertex_info[i], push_data) == nullptr) {
+			drop_draw();
+			return;
+		}
 	}
 }
 
