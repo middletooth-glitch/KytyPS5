@@ -619,8 +619,23 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		return {.layout = vk::ImageLayout::eGeneral};
 	}
 	const auto alignment = desc.info.DataAlignment();
-	EXIT_NOT_IMPLEMENTED(desc.info.data.size == 0 || alignment == 0 ||
-	                     (address & (static_cast<uint64_t>(alignment) - 1u)) != 0);
+	// A descriptor with no data or a base address its layout cannot have is bound as a null
+	// texture, like a null descriptor, instead of ending the emulator (Demon's Souls binds such
+	// a texture while loading the world).
+	if (desc.info.data.size == 0 || alignment == 0 ||
+	    (address & (static_cast<uint64_t>(alignment) - 1u)) != 0) {
+		static std::atomic<uint32_t> reported {0};
+		if (reported.fetch_add(1, std::memory_order_relaxed) < 16u) {
+			LOGF("ResolveTexture: invalid descriptor bound as null: address=0x%010" PRIx64
+			     " size=0x%" PRIx64 " alignment=0x%" PRIx64 " extent=%ux%ux%u levels=%u format=%u "
+			     "tile=%u storage=%d\n",
+			     static_cast<uint64_t>(address), static_cast<uint64_t>(desc.info.data.size),
+			     static_cast<uint64_t>(alignment), width, height, depth,
+			     static_cast<uint32_t>(levels), static_cast<uint32_t>(format),
+			     static_cast<uint32_t>(tile), storage ? 1 : 0);
+		}
+		return {.layout = vk::ImageLayout::eGeneral};
+	}
 	if (storage) {
 		ValidateStorageTexture(resource, descriptor, desc.info.data.size);
 	}
