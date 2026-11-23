@@ -201,7 +201,7 @@ static vk::Format InputFormat(uint8_t raw_format, uint32_t used_components) {
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const GraphicsPipelineKey&                 key,
                             const std::array<const ShaderModule*, 4>& stages,
-                            vk::PipelineCache                          driver_cache) {
+                            vk::PipelineCache driver_cache, bool fatal) {
 	const auto& rendering     = key.rendering;
 	const auto& vertex_input  = key.vertex_input;
 	const auto& static_params = key.static_params;
@@ -416,7 +416,15 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	TRACE3D("graphics pipeline begin\n");
 	const auto result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info,
 	                                                            nullptr, &pipeline.pipeline);
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess) {
+		LOGF("Graphics pipeline creation failed: %s (vs=0x%016" PRIx64 " ps=0x%016" PRIx64 ")\n",
+		     vk::to_string(result).c_str(),
+		     stages[0] != nullptr ? stages[0]->info.shader_hash : 0,
+		     stages[3] != nullptr ? stages[3]->info.shader_hash : 0);
+		pipeline.pipeline = nullptr;
+		EXIT_NOT_IMPLEMENTED(fatal);
+		return;
+	}
 	TRACE3D("graphics pipeline end\n");
 
 	graphics.device.destroyShaderModule(tess_control_shader_module, nullptr);
@@ -425,7 +433,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 }
 
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
-                            const ShaderModule& module, vk::PipelineCache driver_cache) {
+                            const ShaderModule& module, vk::PipelineCache driver_cache,
+                            bool fatal) {
 	vk::PipelineShaderStageCreateInfo                     comp_shader_stage_info {};
 	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo comp_subgroup_size {};
 	comp_shader_stage_info.stage  = vk::ShaderStageFlagBits::eCompute;
@@ -457,7 +466,13 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	}
 	const auto result =
 	    graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr, &pipeline.pipeline);
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	if (result != vk::Result::eSuccess) {
+		LOGF("Compute pipeline creation failed: %s (cs=0x%016" PRIx64 " wave=%u)\n",
+		     vk::to_string(result).c_str(), module.info.shader_hash, wave_size);
+		pipeline.pipeline = nullptr;
+		EXIT_NOT_IMPLEMENTED(fatal);
+		return;
+	}
 	if (uses_3d) {
 		TRACE3D("compute pipeline hash=0x%016" PRIx64 " end\n", module.info.shader_hash);
 	}

@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 
 // Diagnostic trace of the steps around shaders that use 3D images, to find which one AMD's
 // driver crashes after. Lines start with "trace3d:".
@@ -14,8 +15,17 @@ namespace Libs::Graphics::Trace3d {
 inline std::atomic<bool>     g_seen {false};
 inline std::atomic<uint32_t> g_submits {0};
 
+// Off unless KYTY_TRACE3D=1.
+inline bool Enabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_TRACE3D");
+		return value != nullptr && value[0] == '1';
+	}();
+	return enabled;
+}
+
 inline bool TraceSubmit() {
-	return g_seen.load(std::memory_order_relaxed) &&
+	return Enabled() && g_seen.load(std::memory_order_relaxed) &&
 	       g_submits.fetch_add(1, std::memory_order_relaxed) < 400u;
 }
 
@@ -24,8 +34,10 @@ inline bool TraceSubmit() {
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define TRACE3D(...)                                                                               \
 	do {                                                                                           \
-		LOGF("trace3d: " __VA_ARGS__);                                                             \
-		std::fflush(stdout);                                                                       \
+		if (Libs::Graphics::Trace3d::Enabled()) {                                                 \
+			LOGF("trace3d: " __VA_ARGS__);                                                         \
+			std::fflush(stdout);                                                                   \
+		}                                                                                          \
 	} while (false)
 
 #endif /* KYTY_GRAPHICS_HOST_GPU_RENDERER_TRACE3D_H_ */

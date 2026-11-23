@@ -184,13 +184,15 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 		if (module != nullptr && module->info.stage == ShaderType::Compute &&
 		    !module->host_skipped) {
 			jobs.emplace_back([this, module, &pipeline = m_compute_pipelines[module->id]] {
-				CreatePipelineInternal(m_graphics, pipeline, *module, m_driver_cache);
+				CreatePipelineInternal(m_graphics, pipeline, *module, m_driver_cache, false);
 			});
 		}
 	}
 	Common::ParallelFor(jobs.size(), [&](size_t i) { jobs[i](); });
 	// A key with a stage missing from the store keeps no pipeline.
 	std::erase_if(m_graphics_pipelines,
+	              [](const auto& entry) { return entry.second.pipeline == nullptr; });
+	std::erase_if(m_compute_pipelines,
 	              [](const auto& entry) { return entry.second.pipeline == nullptr; });
 	if (!m_graphics_pipelines.empty() || !m_compute_pipelines.empty()) {
 		CheckpointDriverCache();
@@ -333,7 +335,8 @@ bool PipelineCache::CreateGraphicsPipeline(Pipeline& pipeline, const GraphicsPip
 		}
 		stages[i] = found->second;
 	}
-	CreatePipelineInternal(m_graphics, pipeline, key, stages, m_driver_cache);
+	// Warm-up: a pipeline the driver rejects here is created again when the game needs it.
+	CreatePipelineInternal(m_graphics, pipeline, key, stages, m_driver_cache, false);
 	return true;
 }
 

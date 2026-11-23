@@ -302,13 +302,15 @@ std::filesystem::path ShaderStorePath();
 // Host capabilities that change the emitted SPIR-V.
 ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics);
 
-// Stages are indexed like GraphicsPipelineKey::stage_ids.
+// Stages are indexed like GraphicsPipelineKey::stage_ids. A driver failure ends the emulator
+// unless fatal is false (shader-cache warm-up): then it is logged and pipeline stays null.
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const GraphicsPipelineKey&                 key,
                             const std::array<const ShaderModule*, 4>& stages,
-                            vk::PipelineCache                          driver_cache);
+                            vk::PipelineCache driver_cache, bool fatal = true);
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
-                            const ShaderModule& module, vk::PipelineCache driver_cache);
+                            const ShaderModule& module, vk::PipelineCache driver_cache,
+                            bool fatal = true);
 
 } // namespace Libs::Graphics
 
