@@ -130,6 +130,10 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
       m_buffer_cache(buffer_cache), m_readback_linear_images(Config::ReadbackLinearImagesEnabled()),
       m_readback_tiled_images(Config::ReadbackTiledImagesEnabled()),
       m_readback_storage_images(Config::ReadbackStorageImagesEnabled()) {
+	if (const char* seed = std::getenv("KYTY_SEED_OVERLAP");
+	    seed != nullptr && std::strcmp(seed, "0") == 0) {
+		m_seed_overlap = false;
+	}
 	if (const char* order = std::getenv("KYTY_BC_ALIAS_ORDER");
 	    order != nullptr && std::strcmp(order, "0") == 0) {
 		m_bc_alias_order = false;
@@ -1388,6 +1392,38 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			} else if (resolved.info.resources < desc.info.resources) {
 				FreeImage(result);
 				result = {};
+			}
+		}
+		if (!result && m_seed_overlap && desc.type == BindingType::Storage) {
+			// PS5: a raw image over part of a GPU-written raw image of the same layout (the mip
+			// tail block of a raw BC mip chain written as one 64x64 image) starts from that
+			// image's contents, so texels the guest leaves alone keep the earlier GPU write.
+			for (const auto candidate: candidates) {
+				auto* owner = m_slot_images.try_get(candidate);
+				if (owner == nullptr || !owner->registered || !owner->SafeToDownload() ||
+				    owner->usage.render_target ||
+				    owner->info.IsBlock() || desc.info.IsBlock() ||
+				    owner->info.pixel_format != desc.info.pixel_format ||
+				    owner->info.tile_mode != desc.info.tile_mode ||
+				    owner->info.bytes_per_block != desc.info.bytes_per_block ||
+				    owner->info.samples != 1 || desc.info.samples != 1 ||
+				    desc.info.data.address < owner->info.data.address ||
+				    desc.info.data.End() > owner->info.data.End() ||
+				    owner->info.data.size == desc.info.data.size) {
+					continue;
+				}
+				const bool published = BcAlias::Publish(*this, *owner);
+				static std::atomic<uint32_t> logged {0};
+				if (logged.fetch_add(1, std::memory_order_relaxed) < 32u) {
+					std::printf("Overlap seed: %s %ux%u (%u levels) at 0x%016llx from GPU-written "
+					            "%ux%u (%u levels) published=%d\n",
+					            vk::to_string(desc.info.pixel_format).c_str(),
+					            desc.info.extent.width, desc.info.extent.height,
+					            desc.info.resources.levels,
+					            static_cast<unsigned long long>(desc.info.data.address),
+					            owner->info.extent.width, owner->info.extent.height,
+					            owner->info.resources.levels, published ? 1 : 0);
+				}
 			}
 		}
 		if (!result) {

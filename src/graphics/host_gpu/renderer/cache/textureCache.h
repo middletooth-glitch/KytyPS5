@@ -284,6 +284,8 @@ private:
 	bool     m_readback_storage_images = false;
 	// KYTY_BC_ALIAS_ORDER=0: retire overlapping raw block images in discovery order.
 	bool     m_bc_alias_order = true;
+	// KYTY_SEED_OVERLAP=0: new raw images inside a GPU-written raw image start from guest memory.
+	bool     m_seed_overlap = true;
 
 	friend struct TextureCacheTestAccess;
 	friend class BufferCache;
