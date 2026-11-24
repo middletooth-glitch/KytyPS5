@@ -2105,4 +2105,49 @@ void* RuntimeLinker::ApplicationHeapMalloc(uint64_t size) {
 	return m_application_heap_malloc != nullptr ? m_application_heap_malloc(size) : nullptr;
 }
 
+
+std::string DescribeFaultingHostCode() {
+	std::string text;
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	void*      frames[62] {};
+	const auto count = RtlCaptureStackBackTrace(0, 62, frames, nullptr);
+	const auto module_of = [](void* frame, char* name, size_t name_size) -> uint64_t {
+		HMODULE module = nullptr;
+		char    path[MAX_PATH] = "?";
+		if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+		                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		                       static_cast<LPCSTR>(frame), &module) != 0) {
+			GetModuleFileNameA(module, path, sizeof(path));
+		}
+		const char* base = path;
+		for (const char* c = path; *c != '\0'; c++) {
+			if (*c == '\\' || *c == '/') base = c + 1;
+		}
+		std::snprintf(name, name_size, "%s", base);
+		return reinterpret_cast<uint64_t>(module);
+	};
+	// The exception dispatcher (ntdll) sits between the handler and the code that faulted.
+	bool after_dispatch = false;
+	int  taken          = 0;
+	for (USHORT i = 0; i < count && taken < 4; i++) {
+		char       name[MAX_PATH];
+		const auto module = module_of(frames[i], name, sizeof(name));
+		const bool ntdll  = _stricmp(name, "ntdll.dll") == 0;
+		if (!after_dispatch) {
+			after_dispatch = ntdll;
+			continue;
+		}
+		if (ntdll) {
+			continue;
+		}
+		char frame_text[MAX_PATH + 32];
+		std::snprintf(frame_text, sizeof(frame_text), "%s%s+0x%" PRIx64, taken != 0 ? " < " : "",
+		              name, reinterpret_cast<uint64_t>(frames[i]) - module);
+		text += frame_text;
+		taken++;
+	}
+#endif
+	return text;
+}
+
 } // namespace Loader

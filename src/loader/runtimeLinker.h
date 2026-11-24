@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace Loader {
@@ -189,6 +190,10 @@ uint64_t CalcFlexibleMemorySize(const Elf64_Phdr* phdr, uint16_t phnum);
 bool TestMainEntryUsesGuestStack();
 bool TestModuleRelocationUsesWritableHostMapping();
 #endif
+
+// Diagnostics (Windows): inside a host exception handler, the frames of the code that faulted, as
+// "module+offset < module+offset < ..." (empty elsewhere).
+std::string DescribeFaultingHostCode();
 
 } // namespace Loader
 

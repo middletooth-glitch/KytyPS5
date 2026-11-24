@@ -14,6 +14,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "kernel/memory.h"
 #include "graphics/host_gpu/renderer/waitProfile.h"
+#include "loader/runtimeLinker.h"
 
 #include <algorithm>
 #include <chrono>
@@ -502,9 +503,19 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 		     vaddr, size);
 	}
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write] {
+	// KYTY_WAIT_PROFILE: who faulted, the game (a guest thread) or the emulator's own GPU thread
+	// (with the host code that read the memory).
+	std::string who;
+	if (WaitProfile::Enabled()) {
+		who = GuestGpu::IsGpuThread() ? "emulator GPU thread: " + Loader::DescribeFaultingHostCode()
+		                              : std::string("game thread");
+	}
+	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, who] {
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
+		}
+		if (!who.empty() && IsRegionGpuModified(vaddr, size)) {
+			WaitProfile::Event(std::string(is_write ? "write" : "read") + " fault from " + who);
 		}
 		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 		if (IsRegionGpuModified(vaddr, size)) {
