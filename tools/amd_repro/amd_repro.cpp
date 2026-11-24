@@ -529,6 +529,19 @@ int RunChild(const std::filesystem::path& spv, uint32_t bits, int image_format =
 	pipeline_info.stage.module = module;
 	pipeline_info.stage.pName  = "main";
 	if ((bits & kSubgroup) && s13.subgroupSizeControl) pipeline_info.stage.pNext = &subgroup;
+	// Experiments: AMD_REPRO_PIPELINE_FLAGS / AMD_REPRO_STAGE_FLAGS (hex) add create flags, e.g.
+	// 1 = VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT; AMD_REPRO_SUBGROUP=0 drops the required
+	// subgroup size, another value replaces it.
+	if (const char* v = std::getenv("AMD_REPRO_PIPELINE_FLAGS"))
+		pipeline_info.flags |= static_cast<VkPipelineCreateFlags>(std::strtoul(v, nullptr, 16));
+	if (const char* v = std::getenv("AMD_REPRO_STAGE_FLAGS"))
+		pipeline_info.stage.flags |=
+		    static_cast<VkPipelineShaderStageCreateFlags>(std::strtoul(v, nullptr, 16));
+	if (const char* v = std::getenv("AMD_REPRO_SUBGROUP")) {
+		const auto size = static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+		if (size == 0) pipeline_info.stage.pNext = nullptr;
+		else subgroup.requiredSubgroupSize = size;
+	}
 	const VkSpecializationMapEntry spec_entries[] {{0, 0, 4}, {1, 4, 4}};
 	const VkSpecializationInfo     spec_info {2, spec_entries, sizeof(g_spec_values), g_spec_values};
 	if (g_specialize) pipeline_info.stage.pSpecializationInfo = &spec_info;
