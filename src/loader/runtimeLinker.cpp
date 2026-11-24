@@ -651,6 +651,10 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			const char* value = std::getenv("KYTY_SRT_CLEAN_READS");
 			return value != nullptr && std::strcmp(value, "1") == 0;
 		}();
+		if (access == GpuAccess::Read &&
+		    Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(info->exception_address) != 0) {
+			Libs::Graphics::ShaderRecompiler::IR::NoteSrtWalkerFault();
+		}
 		if (clean_reads && access == GpuAccess::Read) {
 			if (const auto length = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(
 			        info->exception_address)) {

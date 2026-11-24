@@ -731,6 +731,17 @@ struct ResourcePlan {
 	std::unique_ptr<Xbyak::CodeGenerator> srt_code;
 	uint32_t                              srt_user_data = 0; // User-data DWORDs the walker reads.
 	uint32_t                              srt_captures  = 0; // Scratch offset of loaded addresses.
+	// Walks that read GPU-watched memory (a walker load faulted), by user data: the walk's
+	// results and every guest word it read with its value (SrtWalker.cpp, WalkSrt).
+	struct SrtWalkMemo {
+		std::vector<uint32_t> user_data;
+		uint64_t              shader_base = 0;
+		std::vector<uint64_t> scratch;
+		std::vector<uint32_t> flat;
+		uint64_t              captured_end = 0; // scratch index after the captured addresses
+		std::vector<uint32_t> values;           // per captured address
+	};
+	mutable std::unordered_map<uint64_t, SrtWalkMemo> srt_walk_memo;
 	// GPU-thread scratch for walker results and material keys.
 	mutable std::vector<uint64_t>           srt_scratch;
 	mutable std::vector<uint32_t>           material_keys;

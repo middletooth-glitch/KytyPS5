@@ -3,11 +3,13 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
+#include "kernel/memory.h"
 
 #include <xbyak/xbyak.h>
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -169,6 +171,7 @@ const uint8_t* Scratch(const ResourcePlan& plan) {
 }
 
 thread_local const Xbyak::CodeGenerator* t_running_walker = nullptr;
+thread_local uint32_t                     t_walker_faults  = 0;
 
 class RuntimeValidator {
 public:
@@ -1449,16 +1452,97 @@ void CompileSrtWalker(ResourcePlan& plan, std::span<const Value> values) {
 	WalkerCompiler(plan, *plan.srt_code).Compile(values);
 }
 
+void NoteSrtWalkerFault() {
+	++t_walker_faults;
+}
+
+namespace {
+
+// KYTY_SRT_MEMO=0 turns the walk memo off.
+bool SrtMemoEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_SRT_MEMO");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	return enabled;
+}
+
+uint64_t SrtMemoKey(std::span<const uint32_t> user_data, uint64_t shader_base) {
+	uint64_t hash = 0xcbf29ce484222325ull ^ shader_base;
+	for (const auto word: user_data) {
+		hash = (hash ^ word) * 0x100000001b3ull;
+	}
+	return hash;
+}
+
+} // namespace
+
+// A walk is a function of the user data, the shader base and the guest words it loads: with
+// those unchanged it would load the same words and produce the same results. A walk that loaded
+// GPU-watched memory (its loads faulted, each a GPU readback) is memoized; the next walk with the
+// same user data compares the logged words with guest memory read from the backing, which only
+// succeeds for words no GPU write is pending on, and reuses the results without loading them.
 bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<uint32_t>& flat,
              std::vector<std::pair<uint64_t, uint64_t>>* reads) {
 	if (plan.srt_code == nullptr || runtime.user_data.size() < plan.srt_user_data) return false;
-	flat.assign(plan.srt_reads.size(), 0u);
-	using Walker = const uint64_t* KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*, uint64_t*, uint64_t);
-	t_running_walker = plan.srt_code.get();
-	const auto* end = plan.srt_code->getCode<Walker>()(runtime.user_data.data(), flat.data(),
-	                                                     plan.srt_scratch.data(), runtime.shader_base);
-	t_running_walker = nullptr;
-	if (end == nullptr) return false;
+	const std::span<const uint32_t> user_data {runtime.user_data.data(), plan.srt_user_data};
+	const bool memo_enabled = SrtMemoEnabled();
+	const auto key          = memo_enabled ? SrtMemoKey(user_data, runtime.shader_base) : 0u;
+	const auto first_capture = static_cast<size_t>(plan.srt_captures / 8u);
+	const uint64_t* end     = nullptr;
+	bool            reused  = false;
+	if (memo_enabled) {
+		if (auto found = plan.srt_walk_memo.find(key); found != plan.srt_walk_memo.end()) {
+			const auto& memo = found->second;
+			bool        same = memo.shader_base == runtime.shader_base &&
+			            std::ranges::equal(memo.user_data, user_data) &&
+			            memo.scratch.size() == plan.srt_scratch.size();
+			for (size_t index = 0; same && index < memo.values.size(); ++index) {
+				uint32_t value = 0;
+				same = LibKernel::Memory::TryReadCurrentBacking(memo.scratch[first_capture + index],
+				                                                &value, sizeof(value)) &&
+				       value == memo.values[index];
+			}
+			if (same) {
+				std::ranges::copy(memo.scratch, plan.srt_scratch.begin());
+				flat = memo.flat;
+				end    = plan.srt_scratch.data() + memo.captured_end;
+				reused = true;
+			} else {
+				plan.srt_walk_memo.erase(found);
+			}
+		}
+	}
+	if (!reused) {
+		flat.assign(plan.srt_reads.size(), 0u);
+		using Walker =
+		    const uint64_t* KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*, uint64_t*, uint64_t);
+		const auto faults_before = t_walker_faults;
+		t_running_walker         = plan.srt_code.get();
+		end = plan.srt_code->getCode<Walker>()(runtime.user_data.data(), flat.data(),
+		                                       plan.srt_scratch.data(), runtime.shader_base);
+		t_running_walker = nullptr;
+		if (end == nullptr) return false;
+		// Every loaded word is current in guest memory now (a faulting load read it back).
+		if (memo_enabled && t_walker_faults != faults_before) {
+			constexpr size_t MaxMemos = 4096;
+			if (plan.srt_walk_memo.size() >= MaxMemos) plan.srt_walk_memo.clear();
+			ResourcePlan::SrtWalkMemo memo;
+			memo.user_data.assign(user_data.begin(), user_data.end());
+			memo.shader_base  = runtime.shader_base;
+			memo.scratch      = plan.srt_scratch;
+			memo.flat         = flat;
+			memo.captured_end = static_cast<uint64_t>(end - plan.srt_scratch.data());
+			const std::span captured {plan.srt_scratch.data() + first_capture, end};
+			memo.values.resize(captured.size());
+			bool readable = true;
+			for (size_t index = 0; readable && index < captured.size(); ++index) {
+				readable = LibKernel::Memory::TryReadBacking(captured[index], &memo.values[index],
+				                                            sizeof(uint32_t));
+			}
+			if (readable) plan.srt_walk_memo.insert_or_assign(key, std::move(memo));
+		}
+	}
 	if (reads != nullptr) {
 		// Resizing first lets the copy vectorize; emplace_back reloads the vector's end per read.
 		const std::span captured {plan.srt_scratch.data() + plan.srt_captures / 8u, end};
