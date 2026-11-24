@@ -157,7 +157,8 @@ void BufferCache::DeleteBuffer(BufferId id) {
 
 template <bool async>
 bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size,
-                                       std::vector<std::function<void()>>* batch) {
+                                       std::vector<std::function<void()>>* batch,
+                                       vk::CommandBuffer target) {
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size     = 0;
 	const auto                  buffer_address = buffer.CpuAddress();
@@ -183,9 +184,12 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		copy.dstOffset += download.offset;
 	}
 
-	auto& command = m_scheduler.Current();
-	command.EndRendering();
-	const auto              native = command.Handle();
+	vk::CommandBuffer native = target;
+	if (!native) {
+		auto& command = m_scheduler.Current();
+		command.EndRendering();
+		native = command.Handle();
+	}
 	vk::BufferMemoryBarrier before {};
 	before.srcAccessMask       = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
 	before.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
@@ -275,6 +279,12 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 }
 
 BufferCache::~BufferCache() {
+	if (m_readback_fence) {
+		m_graphics.device.destroyFence(m_readback_fence, nullptr);
+	}
+	if (m_readback_pool) {
+		m_graphics.device.destroyCommandPool(m_readback_pool, nullptr);
+	}
 	if (!m_gpu_modified_ranges.Empty()) {
 		EXIT("BufferCache: destroyed with pending GPU-modified ranges\n");
 	}
@@ -305,19 +315,18 @@ void BufferCache::ReadBackGpuModified(Buffer& buffer, uint64_t vaddr, uint64_t s
 	constexpr int64_t HotLifetimeNs = 2'000'000'000;
 	constexpr size_t  MaxHotPages   = 4096;
 
-	std::vector<std::function<void()>>       publishes;
-	std::vector<std::pair<uint64_t, uint64_t>> unmark;
-	const auto record = [&](Buffer& owner, uint64_t start, uint64_t bytes) {
-		if (DownloadBufferMemory<false>(owner, start, bytes, &publishes)) {
-			unmark.emplace_back(start, bytes);
-		}
+	// The regions to read back: the window around the access, then the hot pages.
+	struct Region {
+		Buffer*  buffer;
+		uint64_t start;
+		uint64_t size;
 	};
-
-	const auto start =
+	std::vector<Region> regions;
+	const auto          start =
 	    std::max(Common::AlignDown(vaddr, DownloadWindowSize), buffer.CpuAddress());
 	const auto end = std::min(std::max(start + DownloadWindowSize, vaddr + size),
 	                          buffer.CpuAddress() + buffer.Size());
-	record(buffer, start, end - start);
+	regions.push_back({&buffer, start, end - start});
 
 	uint64_t hot_pages = 0;
 	if (batching) {
@@ -359,18 +368,92 @@ void BufferCache::ReadBackGpuModified(Buffer& buffer, uint64_t vaddr, uint64_t s
 			}
 			last = std::min(last, hot_buffer.CpuAddress() + hot_buffer.Size());
 			if (first < last) {
-				record(hot_buffer, first, last - first);
+				regions.push_back({&hot_buffer, first, last - first});
 				hot_pages += (last - first) / TRACKER_PAGE_SIZE;
 			}
 		}
 	}
+
+	// Data the command buffer being recorded does not write is final once the work already
+	// submitted completes.
+	static const bool out_of_band_enabled = [] {
+		const char* value = std::getenv("KYTY_READBACK_OOB");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	const bool out_of_band =
+	    out_of_band_enabled && std::ranges::none_of(regions, [&](const Region& region) {
+		    return WrittenSinceSubmit(region.start, region.size);
+	    });
+	if (out_of_band && !m_readback_pool) {
+		vk::CommandPoolCreateInfo pool_info {};
+		pool_info.queueFamilyIndex = m_graphics.queue_family;
+		pool_info.flags            = vk::CommandPoolCreateFlagBits::eTransient |
+		                  vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
+		EXIT_NOT_IMPLEMENTED(m_graphics.device.createCommandPool(&pool_info, nullptr,
+		                                                         &m_readback_pool) !=
+		                     vk::Result::eSuccess);
+		vk::CommandBufferAllocateInfo allocate {};
+		allocate.commandPool        = m_readback_pool;
+		allocate.level              = vk::CommandBufferLevel::ePrimary;
+		allocate.commandBufferCount = 1;
+		EXIT_NOT_IMPLEMENTED(m_graphics.device.allocateCommandBuffers(
+		                         &allocate, &m_readback_command) != vk::Result::eSuccess);
+		vk::FenceCreateInfo fence_info {};
+		EXIT_NOT_IMPLEMENTED(m_graphics.device.createFence(&fence_info, nullptr,
+		                                                   &m_readback_fence) !=
+		                     vk::Result::eSuccess);
+	}
+	if (out_of_band) {
+		vk::CommandBufferBeginInfo begin {};
+		begin.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+		EXIT_NOT_IMPLEMENTED(m_readback_command.begin(&begin) != vk::Result::eSuccess);
+	}
+
+	std::vector<std::function<void()>>         publishes;
+	std::vector<std::pair<uint64_t, uint64_t>> unmark;
+	for (const auto& region: regions) {
+		if (DownloadBufferMemory<false>(*region.buffer, region.start, region.size, &publishes,
+		                                out_of_band ? m_readback_command : nullptr)) {
+			unmark.emplace_back(region.start, region.size);
+		}
+	}
+	if (out_of_band) {
+		EXIT_NOT_IMPLEMENTED(m_readback_command.end() != vk::Result::eSuccess);
+	}
 	if (publishes.empty()) {
+		if (out_of_band) {
+			(void)m_readback_command.reset({});
+		}
 		return;
 	}
 	if (hot_pages != 0) {
 		WaitProfile::Event("hot pages read back with a fault", hot_pages * TRACKER_PAGE_SIZE);
 	}
-	{
+	if (out_of_band) {
+		WaitProfile::Tag tag("buffer download (own submit)");
+		const auto       wait_start = std::chrono::steady_clock::now();
+		{
+			Common::LockGuard lock(m_graphics.queue_mutex);
+			vk::SubmitInfo    submit {};
+			submit.commandBufferCount = 1;
+			submit.pCommandBuffers    = &m_readback_command;
+			const auto result         = m_graphics.queue.submit(1, &submit, m_readback_fence);
+			if (result != vk::Result::eSuccess) {
+				EXIT("vkQueueSubmit (readback) failed: %s\n", vk::to_string(result).c_str());
+			}
+		}
+		EXIT_NOT_IMPLEMENTED(m_graphics.device.waitForFences(1, &m_readback_fence, VK_TRUE,
+		                                                     UINT64_MAX) != vk::Result::eSuccess);
+		WaitProfile::Record(static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+		                                                         wait_start)
+		        .count()));
+		EXIT_NOT_IMPLEMENTED(m_graphics.device.resetFences(1, &m_readback_fence) !=
+		                     vk::Result::eSuccess);
+		(void)m_readback_command.reset({});
+		// Older deferred downloads of submitted work publish before this newer data.
+		m_scheduler.WaitPriorityOperations(m_scheduler.CurrentTick() - 1);
+	} else {
 		const auto       tick = m_scheduler.CurrentTick();
 		WaitProfile::Tag tag("buffer download (sync)");
 		m_scheduler.Wait(tick);
@@ -382,6 +465,15 @@ void BufferCache::ReadBackGpuModified(Buffer& buffer, uint64_t vaddr, uint64_t s
 	for (const auto& [address, bytes]: unmark) {
 		m_memory_tracker.UnmarkRegionAsGpuModified(address, bytes);
 	}
+}
+
+bool BufferCache::WrittenSinceSubmit(uint64_t vaddr, uint64_t size) {
+	const auto tick = m_scheduler.CurrentTick();
+	if (m_written_unsubmitted_tick != tick) {
+		m_written_unsubmitted      = RangeSet {};
+		m_written_unsubmitted_tick = tick;
+	}
+	return size != 0 && m_written_unsubmitted.Intersects(vaddr, size);
 }
 
 bool BufferCache::SkipReadback(bool is_write) {
@@ -661,6 +753,8 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	if (is_written) {
 		m_gpu_modified_ranges.Add(vaddr, size);
 		ForgetColorMetadataChecks(vaddr, size);
+		(void)WrittenSinceSubmit(vaddr, 0);
+		m_written_unsubmitted.Add(vaddr, size);
 		if (WaitProfile::Enabled()) {
 			auto& binding  = m_profile_written[vaddr];
 			binding.size   = std::max(binding.size, size);

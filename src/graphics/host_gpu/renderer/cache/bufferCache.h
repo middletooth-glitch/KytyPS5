@@ -135,7 +135,17 @@ private:
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size,
-	                                        std::vector<std::function<void()>>* batch = nullptr);
+	                                        std::vector<std::function<void()>>* batch = nullptr,
+	                                        vk::CommandBuffer target = nullptr);
+	// Ranges bound as GPU-written since the last submit (the current command buffer writes them).
+	RangeSet m_written_unsubmitted;
+	uint64_t m_written_unsubmitted_tick = 0;
+	bool     WrittenSinceSubmit(uint64_t vaddr, uint64_t size);
+	// A readback of data written only by already-submitted work runs in its own small
+	// submission, so the command buffer being recorded is neither split nor waited for.
+	vk::CommandPool   m_readback_pool    = nullptr;
+	vk::CommandBuffer m_readback_command = nullptr;
+	vk::Fence         m_readback_fence   = nullptr;
 	// Pages the CPU faulted on after GPU writes (steady-clock ns of the last fault). A
 	// synchronous readback downloads the GPU-modified ones too, in the same GPU wait, since
 	// games read the same GPU results every frame.
