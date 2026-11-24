@@ -184,6 +184,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	for (const auto* module: modules | std::views::values) {
 		// A wave64 module that runs in wave32 on AMD is never given a pipeline there.
 		const bool amd_crash = m_graphics.amd_compute_wave32_level != AmdWave32Off &&
+		                       !m_graphics.amd_wave64_no_optimization &&
 		                       module != nullptr && module->host_subgroup_size == 64u &&
 		                       AmdNeedsWave32(m_graphics.amd_compute_wave32_level,
 		                                      module->subgroup_features, module->guest_hash);

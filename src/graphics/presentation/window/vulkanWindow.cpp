@@ -551,7 +551,13 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 				graphics.amd_compute_wave32_level = 1u;
 				name                              = "pattern";
 			}
-			LOGF("Vulkan subgroup: AMD GPU, wave32 for compute shaders selected by '%s'\n", name);
+			const char* noopt = std::getenv("KYTY_AMD_NOOPT");
+			graphics.amd_wave64_no_optimization =
+			    graphics.amd_compute_wave32_level != 0u &&
+			    (noopt == nullptr || std::strcmp(noopt, "0") != 0);
+			LOGF("Vulkan subgroup: AMD GPU, compute shaders selected by '%s' run %s\n", name,
+			     graphics.amd_wave64_no_optimization ? "in wave64 without driver optimization"
+			                                         : "in wave32");
 		}
 	}
 	LOGF("Vulkan subgroup: default=%u min=%u max=%u stages=0x%08x size_control=%s wave64=%s\n",

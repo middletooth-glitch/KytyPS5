@@ -1017,6 +1017,7 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
 	const bool known_wave32 = m_graphics.amd_compute_wave32_level != AmdWave32Off &&
+	                          !m_graphics.amd_wave64_no_optimization &&
 	                          input_info.host_subgroup_size == 64u &&
 	                          m_amd_wave32_hashes.contains(params.hash);
 	if (known_wave32) {
@@ -1035,6 +1036,7 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
 	}
 	// AMD: a wave64 module its driver would crash on is emitted again for 32-lane subgroups.
 	if (module != nullptr && m_graphics.amd_compute_wave32_level != AmdWave32Off &&
+	    !m_graphics.amd_wave64_no_optimization &&
 	    input_info.host_subgroup_size == 64u &&
 	    AmdNeedsWave32(m_graphics.amd_compute_wave32_level, module->subgroup_features,
 	                   params.hash)) {

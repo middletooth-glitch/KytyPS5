@@ -35,6 +35,10 @@ struct GraphicContext {
 	// AMD default: compute stays wave64, and only shaders that AmdNeedsWave32 selects at this
 	// level are emitted for 32-lane subgroups (0: none, AmdWave32Level in pipelineCache.h).
 	uint32_t amd_compute_wave32_level = 0;
+	// AMD: shaders amd_compute_wave32_level selects stay wave64 and are compiled with
+	// VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT instead of being emitted for 32-lane subgroups:
+	// the crash is in the driver's optimizer (KYTY_AMD_NOOPT=0 goes back to wave32).
+	bool amd_wave64_no_optimization = false;
 	bool                               shader_image_int64_atomics_enabled    = false;
 	bool                               attachment_feedback_loop_enabled      = false;
 	bool                               provoking_vertex_last_enabled         = false;

@@ -1,4 +1,7 @@
 #include "common/assert.h"
+
+#include <atomic>
+#include <cinttypes>
 #include "graphics/host_gpu/renderer/trace3d.h"
 #include "common/common.h"
 #include "common/profiler.h"
@@ -457,6 +460,18 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	vk::ComputePipelineCreateInfo info {};
 	if (module.info.info.uses_gds) {
 		info.flags = vk::PipelineCreateFlagBits::eDispatchBase;
+	}
+	// AMD's Windows driver crashes optimizing some wave64 shaders (lane shuffles and ballots in
+	// loops); without its optimizer it compiles them.
+	if (graphics.amd_wave64_no_optimization && wave_size == 64u &&
+	    AmdNeedsWave32(graphics.amd_compute_wave32_level, module.subgroup_features,
+	                   module.guest_hash)) {
+		info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 128u) {
+			LOGF("Compute pipeline 0x%016" PRIx64 ": wave64 without driver optimization (AMD)\n",
+			     module.guest_hash);
+		}
 	}
 	info.stage  = comp_shader_stage_info;
 	info.layout = pipeline.pipeline_layout;
