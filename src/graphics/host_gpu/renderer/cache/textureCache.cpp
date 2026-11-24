@@ -1283,21 +1283,39 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 	{
 		std::scoped_lock lock {m_lock};
 		Common::SmallVector<ImageId, 8> candidates;
+		Common::SmallVector<ImageId, 8> found;
 		ForEachImageInRegion(desc.info.data.address, desc.info.data.size,
-		                     [&](ImageId id, Image&) { candidates.push_back(id); });
+		                     [&](ImageId id, Image&) { found.push_back(id); });
 		// Raw block images retired into a BC image publish their bytes to guest memory. When
 		// several overlap, the oldest GPU write publishes first so the newest one survives.
 		// Other candidates keep their discovery order.
-		if (candidates.size() > 1 && m_bc_alias_order) {
-			const auto is_alias = [&](ImageId id) {
-				const auto& image = m_slot_images[id];
-				return image.SafeToDownload() && BcAlias::Matches(desc.info, image.info);
-			};
-			const auto aliases = std::stable_partition(candidates.begin(), candidates.end(),
-			                                           is_alias);
-			std::stable_sort(candidates.begin(), aliases, [&](ImageId a, ImageId b) {
+		const auto is_alias = [&](ImageId id) {
+			const auto& image = m_slot_images[id];
+			return image.SafeToDownload() && BcAlias::Matches(desc.info, image.info);
+		};
+		if (m_bc_alias_order && found.size() > 1 &&
+		    std::count_if(found.begin(), found.end(), is_alias) > 1) {
+			std::vector<ImageId> aliases;
+			for (const auto id: found) {
+				if (is_alias(id)) {
+					aliases.push_back(id);
+				}
+			}
+			std::stable_sort(aliases.begin(), aliases.end(), [&](ImageId a, ImageId b) {
 				return m_slot_images[a].gpu_write_serial < m_slot_images[b].gpu_write_serial;
 			});
+			for (const auto id: aliases) {
+				candidates.push_back(id);
+			}
+			for (const auto id: found) {
+				if (!is_alias(id)) {
+					candidates.push_back(id);
+				}
+			}
+		} else {
+			for (const auto id: found) {
+				candidates.push_back(id);
+			}
 		}
 		bool block_alias = false;
 
