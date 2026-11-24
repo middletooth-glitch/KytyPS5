@@ -25,6 +25,7 @@
 #include "loader/additionalContent.h"
 #include "loader/runtimeLinker.h"
 #include "loader/systemContent.h"
+#include "loader/gameArgs.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -165,6 +166,7 @@ void Run(const RunOptions& options) {
 	if (!title_id.empty()) {
 		Log::WriteToConsoleAndLog(fmt::format("Title ID: {}\n", title_id));
 	}
+	Loader::GameArgs::SetTitleDefaults(title_id);
 
 	int ok = atexit(KytyClose);
 	EXIT_NOT_IMPLEMENTED(ok != 0);
