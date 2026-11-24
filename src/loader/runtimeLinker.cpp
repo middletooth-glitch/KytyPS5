@@ -644,10 +644,12 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		}
 		// The SRT walker (the emulator reading a shader's resource tables on the GPU thread) reads
 		// a protected page: bytes no GPU write is pending on are read from the backing, without
-		// the readback (a GPU sync) the fault would take. KYTY_SRT_CLEAN_READS=0 turns it off.
+		// the readback (a GPU sync) the fault would take. Off by default (KYTY_SRT_CLEAN_READS=1
+		// turns it on): the page stays protected, so every later walker read of it faults again
+		// (~96,000 exceptions a second in Demon's Souls), which cost more than the waits saved.
 		static const bool clean_reads = [] {
 			const char* value = std::getenv("KYTY_SRT_CLEAN_READS");
-			return value == nullptr || std::strcmp(value, "0") != 0;
+			return value != nullptr && std::strcmp(value, "1") == 0;
 		}();
 		if (clean_reads && access == GpuAccess::Read) {
 			if (const auto length = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(
