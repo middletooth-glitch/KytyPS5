@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -129,6 +130,10 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
       m_buffer_cache(buffer_cache), m_readback_linear_images(Config::ReadbackLinearImagesEnabled()),
       m_readback_tiled_images(Config::ReadbackTiledImagesEnabled()),
       m_readback_storage_images(Config::ReadbackStorageImagesEnabled()) {
+	if (const char* order = std::getenv("KYTY_BC_ALIAS_ORDER");
+	    order != nullptr && std::strcmp(order, "0") == 0) {
+		m_bc_alias_order = false;
+	}
 	if (m_graphics.CanReportMemoryUsage()) {
 		constexpr int64_t GiB = 1024ll * 1024 * 1024;
 		const auto        budget =
@@ -739,11 +744,15 @@ void Resolve(TextureCache& cache, ImageId cached_id, ImageId merged_id) {
 		// Diagnostics: BC <-> raw block aliases (images the guest writes as raw blocks).
 		static std::atomic<uint32_t> logged {0};
 		if (logged.fetch_add(1, std::memory_order_relaxed) < 32u) {
-			std::printf("BC alias: retiring %s image at 0x%016llx (%ux%u, %u levels) safe=%d\n",
+			std::printf("BC alias: retiring %s image at 0x%016llx (%ux%u, %u levels, 0x%llx bytes) "
+			            "safe=%d write=%llu\n",
 			            vk::to_string(cached.info.pixel_format).c_str(),
 			            static_cast<unsigned long long>(cached.info.data.address),
 			            cached.info.extent.width, cached.info.extent.height,
-			            cached.info.resources.levels, cached.SafeToDownload() ? 1 : 0);
+			            cached.info.resources.levels,
+			            static_cast<unsigned long long>(cached.info.data.size),
+			            cached.SafeToDownload() ? 1 : 0,
+			            static_cast<unsigned long long>(cached.gpu_write_serial));
 		}
 	}
 	// PS5 raw block images can span several packed BC mips. Transfer their complete
@@ -1276,6 +1285,20 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		Common::SmallVector<ImageId, 8> candidates;
 		ForEachImageInRegion(desc.info.data.address, desc.info.data.size,
 		                     [&](ImageId id, Image&) { candidates.push_back(id); });
+		// Raw block images retired into a BC image publish their bytes to guest memory. When
+		// several overlap, the oldest GPU write publishes first so the newest one survives.
+		// Other candidates keep their discovery order.
+		if (candidates.size() > 1 && m_bc_alias_order) {
+			const auto is_alias = [&](ImageId id) {
+				const auto& image = m_slot_images[id];
+				return image.SafeToDownload() && BcAlias::Matches(desc.info, image.info);
+			};
+			const auto aliases = std::stable_partition(candidates.begin(), candidates.end(),
+			                                           is_alias);
+			std::stable_sort(candidates.begin(), aliases, [&](ImageId a, ImageId b) {
+				return m_slot_images[a].gpu_write_serial < m_slot_images[b].gpu_write_serial;
+			});
+		}
 		bool block_alias = false;
 
 		for (const auto id: candidates) {

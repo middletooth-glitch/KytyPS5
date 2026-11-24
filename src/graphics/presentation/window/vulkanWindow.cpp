@@ -553,8 +553,8 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 			}
 			const char* noopt = std::getenv("KYTY_AMD_NOOPT");
 			graphics.amd_wave64_no_optimization =
-			    graphics.amd_compute_wave32_level != 0u &&
-			    (noopt == nullptr || std::strcmp(noopt, "0") != 0);
+			    graphics.amd_compute_wave32_level != 0u && noopt != nullptr &&
+			    std::strcmp(noopt, "0") != 0;
 			LOGF("Vulkan subgroup: AMD GPU, compute shaders selected by '%s' run %s\n", name,
 			     graphics.amd_wave64_no_optimization ? "in wave64 without driver optimization"
 			                                         : "in wave32");

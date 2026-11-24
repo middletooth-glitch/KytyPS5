@@ -96,7 +96,10 @@ public:
 	}
 
 	[[nodiscard]] bool IsGpuModified() const noexcept { return m_gpu_modified; }
-	void               MarkGpuModified() noexcept { m_gpu_modified = true; }
+	void               MarkGpuModified() noexcept {
+		m_gpu_modified   = true;
+		gpu_write_serial = gpu_write_serials.fetch_add(1u, std::memory_order_relaxed) + 1u;
+	}
 	void               ClearGpuModified() noexcept { m_gpu_modified = false; }
 
 	[[nodiscard]] bool IsBufferModified() const noexcept { return m_buffer_modified; }
@@ -156,6 +159,10 @@ public:
 	ImageSubresourceRange stencil_subresources;
 	uint64_t         tick_accessed_last = 0;
 	size_t           lru_id             = 0;
+	// Order of the latest GPU write across all images: overlapping images written by the GPU
+	// publish their bytes oldest first, so the newest contents survive.
+	uint64_t         gpu_write_serial = 0;
+	static inline std::atomic<uint64_t> gpu_write_serials {0};
 	// Resident image heap elements that select this image.
 	std::atomic<uint32_t> heap_refs {0};
 

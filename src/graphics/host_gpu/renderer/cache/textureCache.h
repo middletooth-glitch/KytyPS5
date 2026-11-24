@@ -282,6 +282,8 @@ private:
 	bool     m_readback_linear_images  = false;
 	bool     m_readback_tiled_images   = false;
 	bool     m_readback_storage_images = false;
+	// KYTY_BC_ALIAS_ORDER=0: retire overlapping raw block images in discovery order.
+	bool     m_bc_alias_order = true;
 
 	friend struct TextureCacheTestAccess;
 	friend class BufferCache;
