@@ -812,6 +812,22 @@ bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return g_guest_address_space->TryReadBacking(vaddr, data, size);
 }
 
+bool TryReadCurrentBacking(uint64_t vaddr, void* data, uint64_t size) {
+	if (g_gpu_resources == nullptr || !Graphics::GuestGpu::IsGpuThread()) {
+		return false;
+	}
+	if (IsGpuAddressRange(vaddr, size)) {
+		auto& resources = GetGpuResources();
+		// The same checks a read fault makes (RenderContext::HandleFault): image write-backs over
+		// the bytes, then GPU-written buffer bytes; a readback leaves every other byte as it is.
+		if (resources.GetTextureCache().WriteBackTick(vaddr, size) != 0 ||
+		    resources.GetBufferCache().HasGpuDirtyBytes(vaddr, size)) {
+			return false;
+		}
+	}
+	return TryReadBacking(vaddr, data, size);
+}
+
 bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size)) {
 		if (!Graphics::GuestGpu::IsGpuThread()) {

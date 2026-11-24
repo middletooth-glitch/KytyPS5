@@ -845,4 +845,15 @@ void SkipLoad(void* native_context, size_t length) {
 	context.Advance(length);
 }
 
+uint64_t SrtWalkerLoadAddress(void* native_context) {
+	const Context context {static_cast<decltype(Context::native)>(native_context)};
+	return static_cast<uint64_t>(context.Gpr(10));
+}
+
+void CompleteSrtWalkerLoad(void* native_context, size_t length, uint32_t value) {
+	Context context {static_cast<decltype(Context::native)>(native_context)};
+	context.Gpr(0) = value; // a 32-bit mov zero-extends into rax
+	context.Advance(length);
+}
+
 } // namespace Loader::X64InstructionEmulator

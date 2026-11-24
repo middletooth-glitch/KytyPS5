@@ -24,6 +24,7 @@
 #include "loader/guestInstructionPatcher.h"
 #include "loader/symbolDatabase.h"
 #include "loader/x64InstructionEmulator.h"
+#include "graphics/host_gpu/renderer/waitProfile.h"
 
 #include <algorithm>
 #include <atomic>
@@ -640,6 +641,30 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			case CoreAccess::Write: access = GpuAccess::Write; break;
 			case CoreAccess::Execute: access = GpuAccess::Execute; break;
 			case CoreAccess::Unknown: return false;
+		}
+		// The SRT walker (the emulator reading a shader's resource tables on the GPU thread) reads
+		// a protected page: bytes no GPU write is pending on are read from the backing, without
+		// the readback (a GPU sync) the fault would take. KYTY_SRT_CLEAN_READS=0 turns it off.
+		static const bool clean_reads = [] {
+			const char* value = std::getenv("KYTY_SRT_CLEAN_READS");
+			return value == nullptr || std::strcmp(value, "0") != 0;
+		}();
+		if (clean_reads && access == GpuAccess::Read) {
+			if (const auto length = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(
+			        info->exception_address)) {
+				const auto address =
+				    Loader::X64InstructionEmulator::SrtWalkerLoadAddress(info->native_context);
+				uint32_t value = 0;
+				if (Libs::LibKernel::Memory::TryReadCurrentBacking(address, &value,
+				                                                   sizeof(value))) {
+					Loader::X64InstructionEmulator::CompleteSrtWalkerLoad(info->native_context,
+					                                                      length, value);
+					if (Libs::Graphics::WaitProfile::Enabled()) {
+						Libs::Graphics::WaitProfile::Event("SRT walker read served from backing");
+					}
+					return true;
+				}
+			}
 		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
