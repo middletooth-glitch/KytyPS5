@@ -3,7 +3,6 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
-#include "kernel/memory.h"
 
 #include <xbyak/xbyak.h>
 
@@ -1486,7 +1485,7 @@ bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<ui
              std::vector<std::pair<uint64_t, uint64_t>>* reads) {
 	if (plan.srt_code == nullptr || runtime.user_data.size() < plan.srt_user_data) return false;
 	const std::span<const uint32_t> user_data {runtime.user_data.data(), plan.srt_user_data};
-	const bool memo_enabled = SrtMemoEnabled();
+	const bool memo_enabled = SrtMemoEnabled() && runtime.read_current_memory != nullptr;
 	const auto key          = memo_enabled ? SrtMemoKey(user_data, runtime.shader_base) : 0u;
 	const auto first_capture = static_cast<size_t>(plan.srt_captures / 8u);
 	const uint64_t* end     = nullptr;
@@ -1499,8 +1498,8 @@ bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<ui
 			            memo.scratch.size() == plan.srt_scratch.size();
 			for (size_t index = 0; same && index < memo.values.size(); ++index) {
 				uint32_t value = 0;
-				same = LibKernel::Memory::TryReadCurrentBacking(memo.scratch[first_capture + index],
-				                                                &value, sizeof(value)) &&
+				same = runtime.read_current_memory(runtime.userdata, memo.scratch[first_capture + index],
+				                                   std::span {&value, 1}) &&
 				       value == memo.values[index];
 			}
 			if (same) {
@@ -1537,8 +1536,8 @@ bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<ui
 			memo.values.resize(captured.size());
 			bool readable = true;
 			for (size_t index = 0; readable && index < captured.size(); ++index) {
-				readable = LibKernel::Memory::TryReadBacking(captured[index], &memo.values[index],
-				                                            sizeof(uint32_t));
+				readable = runtime.read_current_memory(runtime.userdata, captured[index],
+				                                       std::span {&memo.values[index], 1});
 			}
 			if (readable) plan.srt_walk_memo.insert_or_assign(key, std::move(memo));
 		}

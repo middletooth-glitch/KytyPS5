@@ -119,6 +119,11 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 	       Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
 }
 
+bool ReadCurrentGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
+	return !values.empty() &&
+	       Libs::LibKernel::Memory::TryReadCurrentBacking(address, values.data(), values.size_bytes());
+}
+
 void DumpShader(std::span<const uint32_t> words, const std::string& name) {
 	if (!Config::GraphicsDebugDumpEnabled()) {
 		return;
@@ -325,6 +330,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	    .user_data                  = user_data,
 	    .shader_base                = params.Base(),
 	    .read_specialization_memory = ReadShaderGuestMemory,
+	    .read_current_memory        = ReadCurrentGuestMemory,
 	    .image_heap                 = m_image_heap,
 	};
 	ShaderRecompiler::CompileOptions options {.wave_size = input_info.wave_size};

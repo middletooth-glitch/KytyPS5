@@ -42,6 +42,9 @@ struct SrtRuntime {
 	uint64_t                  shader_base                = 0;
 	void*                     userdata                   = nullptr;
 	SrtMemoryReader           read_specialization_memory = nullptr;
+	// Guest words as they are, failing where a GPU write is pending (no readback): the walk memo
+	// (WalkSrt) checks and records its words with it; without it nothing is memoized.
+	SrtMemoryReader           read_current_memory = nullptr;
 	std::span<const uint32_t> workgroup_counts;
 	uint64_t                  indirect_args_address = 0;
 	ImageHeapSource*          image_heap            = nullptr;
