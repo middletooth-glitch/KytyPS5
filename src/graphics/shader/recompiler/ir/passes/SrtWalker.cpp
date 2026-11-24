@@ -2,6 +2,7 @@
 
 #include "common/abi.h"
 #include "common/assert.h"
+#include "graphics/host_gpu/renderer/waitProfile.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <xbyak/xbyak.h>
@@ -1496,11 +1497,20 @@ bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<ui
 			bool        same = memo.shader_base == runtime.shader_base &&
 			            std::ranges::equal(memo.user_data, user_data) &&
 			            memo.scratch.size() == plan.srt_scratch.size();
+			const char* outcome = same ? nullptr : "SRT memo miss: hash collision";
 			for (size_t index = 0; same && index < memo.values.size(); ++index) {
 				uint32_t value = 0;
-				same = runtime.read_current_memory(runtime.userdata, memo.scratch[first_capture + index],
-				                                   std::span {&value, 1}) &&
-				       value == memo.values[index];
+				if (!runtime.read_current_memory(runtime.userdata, memo.scratch[first_capture + index],
+				                                 std::span {&value, 1})) {
+					same    = false;
+					outcome = "SRT memo miss: a word has a GPU write pending";
+				} else if (value != memo.values[index]) {
+					same    = false;
+					outcome = "SRT memo miss: a word changed";
+				}
+			}
+			if (Graphics::WaitProfile::Enabled()) {
+				Graphics::WaitProfile::Event(same ? "SRT memo hit" : outcome);
 			}
 			if (same) {
 				std::ranges::copy(memo.scratch, plan.srt_scratch.begin());
@@ -1538,6 +1548,10 @@ bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<ui
 			for (size_t index = 0; readable && index < captured.size(); ++index) {
 				readable = runtime.read_current_memory(runtime.userdata, captured[index],
 				                                       std::span {&memo.values[index], 1});
+			}
+			if (Graphics::WaitProfile::Enabled()) {
+				Graphics::WaitProfile::Event(readable ? "SRT memo recorded (walk faulted)"
+				                                      : "SRT memo not recorded: a word has a GPU write pending");
 			}
 			if (readable) plan.srt_walk_memo.insert_or_assign(key, std::move(memo));
 		}
