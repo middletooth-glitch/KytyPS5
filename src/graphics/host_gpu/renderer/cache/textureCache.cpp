@@ -1,5 +1,8 @@
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 
+#include <atomic>
+#include <cstdio>
+
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -732,6 +735,17 @@ bool Publish(TextureCache& cache, Image& image) {
 void Resolve(TextureCache& cache, ImageId cached_id, ImageId merged_id) {
 	auto& cached = cache.m_slot_images[cached_id];
 	auto* merged = merged_id ? &cache.m_slot_images[merged_id] : nullptr;
+	{
+		// Diagnostics: BC <-> raw block aliases (images the guest writes as raw blocks).
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 32u) {
+			std::printf("BC alias: retiring %s image at 0x%016llx (%ux%u, %u levels) safe=%d\n",
+			            vk::to_string(cached.info.pixel_format).c_str(),
+			            static_cast<unsigned long long>(cached.info.data.address),
+			            cached.info.extent.width, cached.info.extent.height,
+			            cached.info.resources.levels, cached.SafeToDownload() ? 1 : 0);
+		}
+	}
 	// PS5 raw block images can span several packed BC mips. Transfer their complete
 	// guest bytes, including tail padding, before retiring the incompatible backing.
 	if (cached.SafeToDownload()) {

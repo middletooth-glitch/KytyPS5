@@ -1,3 +1,5 @@
+#include <atomic>
+#include <cstdio>
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/trace3d.h"
 
@@ -291,6 +293,19 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 		normalized.aspect = vk::ImageAspectFlagBits::eStencil;
 	}
 	normalized.usage = is_storage ? vk::ImageUsageFlagBits::eStorage : vk::ImageUsageFlags {};
+	// Diagnostics: a storage view of an image created without storage usage (block-compressed
+	// formats on drivers that cannot write them): the guest's writes through it are lost.
+	if (is_storage && !(image.usage & vk::ImageUsageFlagBits::eStorage)) {
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 32u) {
+			std::printf("Storage view of an image without storage usage: image_format=%s "
+			            "view_format=%s address=0x%016llx extent=%ux%u levels=%u layers=%u\n",
+			            vk::to_string(image.format).c_str(),
+			            vk::to_string(normalized.format).c_str(),
+			            static_cast<unsigned long long>(info.data.address), image.extent.width,
+			            image.extent.height, image.mip_levels, image.layers);
+		}
+	}
 	for (const auto& cached: views) {
 		if (cached.info == normalized) {
 			return cached.view;
