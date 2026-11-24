@@ -2,7 +2,6 @@
 
 #include "common/abi.h"
 #include "common/assert.h"
-#include "graphics/host_gpu/renderer/waitProfile.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <xbyak/xbyak.h>
@@ -1509,8 +1508,8 @@ bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<ui
 					outcome = "SRT memo miss: a word changed";
 				}
 			}
-			if (Graphics::WaitProfile::Enabled()) {
-				Graphics::WaitProfile::Event(same ? "SRT memo hit" : outcome);
+			if (runtime.profile_event != nullptr) {
+				runtime.profile_event(same ? "SRT memo hit" : outcome);
 			}
 			if (same) {
 				std::ranges::copy(memo.scratch, plan.srt_scratch.begin());
@@ -1549,9 +1548,9 @@ bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<ui
 				readable = runtime.read_current_memory(runtime.userdata, captured[index],
 				                                       std::span {&memo.values[index], 1});
 			}
-			if (Graphics::WaitProfile::Enabled()) {
-				Graphics::WaitProfile::Event(readable ? "SRT memo recorded (walk faulted)"
-				                                      : "SRT memo not recorded: a word has a GPU write pending");
+			if (runtime.profile_event != nullptr) {
+				runtime.profile_event(readable ? "SRT memo recorded (walk faulted)"
+				                               : "SRT memo not recorded: a word has a GPU write pending");
 			}
 			if (readable) plan.srt_walk_memo.insert_or_assign(key, std::move(memo));
 		}

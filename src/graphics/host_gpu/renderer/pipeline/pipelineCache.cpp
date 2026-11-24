@@ -124,6 +124,10 @@ bool ReadCurrentGuestMemory(void*, uint64_t address, std::span<uint32_t> values)
 	       Libs::LibKernel::Memory::TryReadCurrentBacking(address, values.data(), values.size_bytes());
 }
 
+void ProfileSrtEvent(const char* name) {
+	Libs::Graphics::WaitProfile::Event(name);
+}
+
 void DumpShader(std::span<const uint32_t> words, const std::string& name) {
 	if (!Config::GraphicsDebugDumpEnabled()) {
 		return;
@@ -331,6 +335,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	    .shader_base                = params.Base(),
 	    .read_specialization_memory = ReadShaderGuestMemory,
 	    .read_current_memory        = ReadCurrentGuestMemory,
+	    .profile_event              = WaitProfile::Enabled() ? ProfileSrtEvent : nullptr,
 	    .image_heap                 = m_image_heap,
 	};
 	ShaderRecompiler::CompileOptions options {.wave_size = input_info.wave_size};

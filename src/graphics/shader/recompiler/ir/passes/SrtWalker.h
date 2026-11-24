@@ -45,6 +45,8 @@ struct SrtRuntime {
 	// Guest words as they are, failing where a GPU write is pending (no readback): the walk memo
 	// (WalkSrt) checks and records its words with it; without it nothing is memoized.
 	SrtMemoryReader           read_current_memory = nullptr;
+	// Diagnostics: counts a named event (the renderer's wait profile), or nullptr.
+	void (*profile_event)(const char* name) = nullptr;
 	std::span<const uint32_t> workgroup_counts;
 	uint64_t                  indirect_args_address = 0;
 	ImageHeapSource*          image_heap            = nullptr;
