@@ -103,8 +103,8 @@ inline void Add(std::string key, uint64_t ns, uint64_t bytes) {
 		                                  : a.second.count > b.second.count;
 	});
 	LOGF("--- GPU wait profile (%.1f s) ---\n", seconds);
-	if (sorted.size() > 40) {
-		sorted.resize(40);
+	if (sorted.size() > 100) {
+		sorted.resize(100);
 	}
 	for (const auto& [name, value]: sorted) {
 		LOGF("  %8.1f ms/s %8.1f /s %8.2f MB/s  %s\n",
