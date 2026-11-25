@@ -910,6 +910,21 @@ bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 	return m_gpu_modified_ranges.Intersects(vaddr, size);
 }
 
+void BufferCache::SettleGpuWrite(uint64_t vaddr, uint64_t size) {
+	if (size == 0) {
+		return;
+	}
+	m_gpu_modified_ranges.Subtract(vaddr, size);
+	ForgetColorMetadataChecks(vaddr, size);
+	const auto begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+	const auto end   = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+	for (auto page = begin; page < end; page += TRACKER_PAGE_SIZE) {
+		if (!m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
+			m_memory_tracker.UnmarkRegionAsGpuModified(page, TRACKER_PAGE_SIZE);
+		}
+	}
+}
+
 bool BufferCache::HasOnlyGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 	return m_gpu_modified_ranges.Contains(vaddr, size);
 }

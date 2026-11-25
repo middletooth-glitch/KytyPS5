@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/waitProfile.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -32,9 +33,11 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -215,6 +218,99 @@ bool RenderExecutor::TryConsumeComputeFill(const ShaderComputeInputInfo& input,
 	return true;
 }
 
+// Demon's Souls copies small constant blocks into place on the GPU with a replicating copy
+// (dst[i] = src[i % period] for i < count, one dword per thread, 64 threads per group), between
+// draws whose resource tables point into the copied block. Reading those tables then waited for
+// the GPU. When the source is current in guest memory, the CPU writes the same result there as
+// the dispatch is recorded, so the tables read without a GPU sync. The dispatch still runs, so
+// the GPU copy matches. KYTY_MIRROR_COPY=0 turns this off.
+struct RingCopyMirror {
+	uint64_t              destination = 0;
+	uint64_t              settle      = 0; // bytes of the destination binding current after the copy
+	std::vector<uint32_t> values;
+};
+
+static std::optional<RingCopyMirror> PlanRingCopyMirror(RenderContext& context, const HW::ComputeShaderInfo& cs,
+                                                        uint64_t shader_hash, uint32_t group_x,
+                                                        uint32_t group_y, uint32_t group_z,
+                                                        uint32_t mode, bool thread_dimensions) {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_MIRROR_COPY");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	constexpr uint64_t RingCopyHash  = 0x22e0328668b00aa3ull;
+	constexpr uint32_t MaxDwords     = 16384;
+	if (!enabled || shader_hash != RingCopyHash || thread_dimensions || mode != 0x41u ||
+	    group_y != 1 || group_z != 1 || cs.cs_regs.num_thread_x != 64 ||
+	    cs.cs_regs.num_thread_y > 1 || cs.cs_regs.num_thread_z > 1 || cs.cs_regs.user_sgpr != 12 ||
+	    !cs.cs_regs.tgid_x_en) {
+		return std::nullopt;
+	}
+	const auto descriptor = [&](uint32_t first) {
+		ShaderBufferResource resource;
+		std::copy_n(cs.cs_user_sgpr.value + first, 4, resource.fields);
+		return resource;
+	};
+	const auto source      = descriptor(0);
+	const auto destination = descriptor(4);
+	const auto constants   = descriptor(8);
+	const auto simple      = [](const ShaderBufferResource& r) {
+		return r.Stride() == 4 && !r.SwizzleEnabled() && r.IndexStride() == 0 && !r.AddTid() &&
+		       r.Base48() != 0 && (r.Base48() & 3u) == 0 &&
+		       (r.Format() == Prospero::BufferFormat::k32UInt ||
+		        r.Format() == Prospero::BufferFormat::k32SInt ||
+		        r.Format() == Prospero::BufferFormat::k32Float);
+	};
+	if (!simple(source) || !simple(destination) || source.Format() != destination.Format() ||
+	    source.DstSelX() != 4 || constants.Base48() == 0 || constants.GetSize() < 8) {
+		return std::nullopt;
+	}
+	auto& buffers  = context.GetBufferCache();
+	auto& textures = context.GetTextureCache();
+	const auto current = [&](uint64_t address, uint64_t size) {
+		return !buffers.HasGpuDirtyBytes(address, size) && textures.WriteBackTick(address, size) == 0;
+	};
+	uint32_t header[2] = {};
+	if (!current(constants.Base48(), sizeof(header)) ||
+	    !LibKernel::Memory::TryReadBacking(constants.Base48(), header, sizeof(header))) {
+		return std::nullopt;
+	}
+	const uint64_t threads = uint64_t {group_x} * 64u;
+	const uint64_t count   = std::min<uint64_t>({header[0], threads, destination.NumRecords()});
+	const uint32_t period  = header[1];
+	if (count == 0 || count > MaxDwords || period == 0 || period > source.NumRecords()) {
+		return std::nullopt;
+	}
+	const uint64_t source_size      = std::min<uint64_t>(count, period) * 4u;
+	const uint64_t destination_size = count * 4u;
+	const auto     src = source.Base48();
+	const auto     dst = destination.Base48();
+	if ((src < dst + destination_size && dst < src + source_size) || !current(src, source_size) ||
+	    textures.WriteBackTick(dst, destination_size) != 0 ||
+	    textures.IsRegionRegistered(dst, destination_size) ||
+	    textures.IsRegionRegistered(src, source_size)) {
+		return std::nullopt;
+	}
+	std::vector<uint32_t> period_values(source_size / 4u);
+	if (!LibKernel::Memory::TryReadBacking(src, period_values.data(), source_size)) {
+		return std::nullopt;
+	}
+	RingCopyMirror mirror;
+	mirror.destination = dst;
+	mirror.values.resize(count);
+	for (uint64_t i = 0; i < count; ++i) {
+		mirror.values[i] = period_values[i % period_values.size()];
+	}
+	// The dispatch binds the whole destination as written. Bytes past the copy stay what they
+	// were, so they are current too when no GPU write was pending on them.
+	const auto binding_size = destination.GetSize();
+	mirror.settle = binding_size > destination_size &&
+	                        current(dst + destination_size, binding_size - destination_size)
+	                    ? binding_size
+	                    : destination_size;
+	return mirror;
+}
+
 // Global loads read pages without a buffer as zero. Cache the 32 KiB after each base the shader
 // takes from user data or scalar loads before the dispatch reads it.
 static void CacheDmaBases(RenderContext& context, const ShaderStageRuntime& stage) {
@@ -370,6 +466,9 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		thread_group_z = input_info.workgroup_counts[2];
 	}
 
+	auto mirror = PlanRingCopyMirror(m_context, cs_regs, program.shader_hash, thread_group_x,
+	                                 thread_group_y, thread_group_z, mode, use_thread_dimensions);
+
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
 	auto& bindings = m_compute_bindings;
@@ -497,6 +596,16 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
+
+	if (mirror) {
+		LibKernel::Memory::WriteBacking(mirror->destination, mirror->values.data(),
+		                                mirror->values.size() * sizeof(uint32_t));
+		m_context.GetBufferCache().SettleGpuWrite(mirror->destination, mirror->settle);
+		if (WaitProfile::Enabled()) {
+			WaitProfile::Event("ring copy mirrored on the CPU",
+			                   mirror->values.size() * sizeof(uint32_t));
+		}
+	}
 }
 
 void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
@@ -520,6 +629,9 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	input_info.indirect_args_address = args_addr;
 	m_context.GetImageHeap().BeginDraw();
 	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) return;
+	auto mirror = PlanRingCopyMirror(m_context, cs_regs, program.shader_hash, thread_group_x,
+	                                 thread_group_y, thread_group_z, mode, use_thread_dimensions);
+
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
 	auto& bindings = m_compute_bindings;

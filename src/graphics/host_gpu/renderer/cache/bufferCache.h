@@ -81,6 +81,10 @@ public:
 	// Cache-index and exact dirty-range queries require GPU-thread serialization.
 	[[nodiscard]] bool IsRegionRegistered(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool HasGpuDirtyBytes(uint64_t vaddr, uint64_t size);
+	// The CPU wrote to guest memory what recorded GPU work leaves in [vaddr, vaddr + size): the
+	// bytes are current there, so CPU reads need no readback. Pages left without GPU-written
+	// bytes stop being watched.
+	void SettleGpuWrite(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool HasOnlyGpuDirtyBytes(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
