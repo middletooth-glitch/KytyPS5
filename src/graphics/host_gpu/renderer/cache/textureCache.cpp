@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
+#include "graphics/host_gpu/renderer/waitProfile.h"
 
 #include <atomic>
 #include <cstdio>
@@ -1976,13 +1977,35 @@ uint64_t TextureCache::WriteBackTick(uint64_t address, uint64_t size) {
 }
 
 void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
+	// Experiment (KYTY_GPU_WRITE_IMAGES=overlap): a GPU buffer write also refreshes images it
+	// overlaps at other addresses, when they hold no GPU writes of their own.
+	static const bool overlap = [] {
+		const char* value = std::getenv("KYTY_GPU_WRITE_IMAGES");
+		return value != nullptr && std::strcmp(value, "overlap") == 0;
+	}();
+	static std::atomic<uint32_t> logged {0};
 	std::scoped_lock lock {m_lock};
 	ForEachImageInRegion(address, size, [&](ImageId, Image& image) {
-		if (image.info.data.address != address) {
+		if (image.info.data.address == address) {
+			image.ClearGpuModified();
+			image.MarkBufferModified();
 			return;
 		}
-		image.ClearGpuModified();
-		image.MarkBufferModified();
+		const auto count = logged.fetch_add(1, std::memory_order_relaxed);
+		if (count < 64u || count % 4096u == 0u) {
+			std::printf("GPU buffer write over an image: write 0x%016llx+0x%llx (shader 0x%016llx), "
+			            "image 0x%016llx %s %ux%u levels=%u gpu_modified=%d refresh=%d\n",
+			            static_cast<unsigned long long>(address),
+			            static_cast<unsigned long long>(size),
+			            static_cast<unsigned long long>(WaitProfile::t_last_shader_hash),
+			            static_cast<unsigned long long>(image.info.data.address),
+			            vk::to_string(image.info.pixel_format).c_str(), image.info.extent.width,
+			            image.info.extent.height, image.info.resources.levels,
+			            image.IsGpuModified() ? 1 : 0, overlap && !image.IsGpuModified() ? 1 : 0);
+		}
+		if (overlap && !image.IsGpuModified()) {
+			image.MarkBufferModified();
+		}
 	});
 }
 
