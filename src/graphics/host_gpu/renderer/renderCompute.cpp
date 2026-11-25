@@ -629,9 +629,6 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	input_info.indirect_args_address = args_addr;
 	m_context.GetImageHeap().BeginDraw();
 	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) return;
-	auto mirror = PlanRingCopyMirror(m_context, cs_regs, program.shader_hash, thread_group_x,
-	                                 thread_group_y, thread_group_z, mode, use_thread_dimensions);
-
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
 	auto& bindings = m_compute_bindings;
