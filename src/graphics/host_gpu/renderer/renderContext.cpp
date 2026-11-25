@@ -11,6 +11,8 @@
 #include "common/abi.h"
 
 #include <algorithm>
+#include <cinttypes>
+#include <cstdio>
 
 namespace Libs::Graphics {
 
@@ -29,6 +31,13 @@ uint32_t KYTY_SYSV_ABI SrtWalkerWatchedRead(uint64_t address) {
 	// What a faulting read does: read back the GPU write (or wait for the image write-back)
 	// until the bytes are current.
 	ShaderRecompiler::IR::NoteSrtWalkerFault();
+	if (WaitProfile::Enabled()) {
+		char text[128];
+		std::snprintf(text, sizeof(text),
+		              "SRT walker read of GPU-written bytes: shader 0x%016" PRIx64 " at 0x%" PRIx64,
+		              WaitProfile::t_last_shader_hash, address);
+		WaitProfile::Event(text);
+	}
 	for (int attempt = 0; attempt < 4; ++attempt) {
 		if (!LibKernel::Memory::HandleGpuFault(PageFaultAccess::Read, address)) {
 			break;
