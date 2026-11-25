@@ -331,7 +331,31 @@ void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_by
 }
 
 void CommandProcessor::GetLodStats(volatile uint32_t* dst, uint32_t size, bool reset) {
-	auto& counters = m_renderer.GetRenderExecutor().m_mip_stats;
+	auto& executor = m_renderer.GetRenderExecutor();
+	auto& counters = executor.m_mip_stats;
+	uint32_t direct_slots = 0;
+	for (const auto& counter: counters) {
+		direct_slots += counter.finest_level != 15 ? 1u : 0u;
+	}
+	for (const auto& [address, heap]: executor.m_heap_mip_stats) {
+		auto& counter        = counters[heap.id];
+		counter.finest_level = std::min(counter.finest_level, heap.base);
+		if (heap.clamped) {
+			counter.clamped = true;
+		} else {
+			counter.unclamped = true;
+		}
+	}
+	static std::atomic<uint32_t> reports {0};
+	if (const auto report = reports.fetch_add(1, std::memory_order_relaxed);
+	    report < 8u || report % 1024u == 0u) {
+		uint32_t slots = 0;
+		for (const auto& counter: counters) {
+			slots += counter.finest_level != 15 ? 1u : 0u;
+		}
+		std::printf("LOD stats report %u: %u slots sampled (%u by draws), %zu heap textures\n",
+		            report, slots, direct_slots, executor.m_heap_mip_stats.size());
+	}
 	// Each of up to 256 2-dword slots after the 16-dword header holds the clamped sample count
 	// (dword 0 bits 0-23), the slot id (bits 24-31), the unclamped sample count (dword 1 bits 0-23)
 	// and the finest mip sampled (bits 24-27, 15 for none). A non-zero header dword 0 then marks

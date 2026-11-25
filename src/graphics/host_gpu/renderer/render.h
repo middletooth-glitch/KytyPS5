@@ -11,6 +11,9 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
+#include <cstdlib>
+#include <cstring>
+#include <unordered_map>
 #include <span>
 #include <vector>
 
@@ -226,6 +229,18 @@ private:
 	vk::Pipeline                          m_pssr_pipeline          = nullptr;
 	std::vector<UpscalerContext>          m_upscaler_contexts;
 	std::array<MipStatsCounter, 256>      m_mip_stats {};
+	// Textures in image heaps resolve when the heap changes, not per draw: their last
+	// descriptor per base address counts as sampled in every report (KYTY_LOD_STATS_HEAP=0 off).
+	struct HeapMipStats {
+		uint8_t id       = 0;
+		uint8_t base     = 15;
+		bool    clamped  = false;
+	};
+	bool m_lod_stats_heap = [] {
+		const char* value = std::getenv("KYTY_LOD_STATS_HEAP");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	std::unordered_map<uint64_t, HeapMipStats> m_heap_mip_stats;
 
 	friend class CommandProcessor;
 	friend struct RenderExecutorTestAccess;

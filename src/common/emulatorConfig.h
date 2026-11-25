@@ -101,7 +101,7 @@ struct ConfigOptions {
 	bool                   occlusion_queries_enabled   = false;
 	bool                   relaxed_shader_float        = false;
 	bool                   native_rt                   = false;
-	bool                   lod_stats_enabled           = false;
+	bool                   lod_stats_enabled           = true;
 	bool                   trophy_enabled              = true;
 	uint32_t               trophy_duration_seconds     = 6;
 	bool                   perf_overlay_enabled            = false;

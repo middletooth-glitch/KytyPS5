@@ -522,6 +522,16 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	}
 	// Image heap resolves do not follow the draws that sample them and storage access is not
 	// sampling: neither reports samples.
+	if (m_lod_stats && m_lod_stats_heap && descriptor.MipStatsCntEn() && resource.heap &&
+	    !storage) {
+		if (m_heap_mip_stats.size() >= 65536u) {
+			m_heap_mip_stats.clear();
+		}
+		m_heap_mip_stats[descriptor.Base40()] = {
+		    .id      = descriptor.MipStatsCntId(),
+		    .base    = descriptor.BaseLevel(),
+		    .clamped = descriptor.MinLod() > uint32_t {descriptor.BaseLevel()} << 8u};
+	}
 	if (m_lod_stats && descriptor.MipStatsCntEn() && !resource.heap && !storage) {
 		auto&         counter = m_mip_stats[descriptor.MipStatsCntId()];
 		const uint8_t base    = descriptor.BaseLevel();
