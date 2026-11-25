@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cstdlib>
+#include <cstring>
 #include <optional>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
@@ -115,6 +117,45 @@ uint32_t EmitBuiltinU32(EmitterState& state, IR::StageInputKind kind, uint32_t c
 	return EmitInputComponentU32(state, kind, component);
 }
 
+// Pixel shaders read quad_perm DPP sources with quad operations: helper invocations, whose
+// values feed the derivatives guest shaders compute with DPP, may be inactive for shuffles and
+// ballots but take part in quad operations (KYTY_QUAD_DPP=0 turns this off).
+bool UseQuadDpp(const ValueEmitContext& ctx, const IR::DppMoveFlags& flags) {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_QUAD_DPP");
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}();
+	return enabled && ctx.state.program.stage == ShaderType::Pixel && ctx.other_half == nullptr &&
+	       !flags.dpp8 && flags.control <= 0xffu;
+}
+
+// The value of the quad lane quad_perm selects for this invocation.
+uint32_t EmitQuadPermRead(EmitterState& state, uint32_t type, uint32_t value, uint32_t control) {
+	state.builder.RequireCapability(spv::CapabilityGroupNonUniform);
+	state.builder.RequireCapability(spv::CapabilityGroupNonUniformQuad);
+	const auto scope     = ConstantU32(state, spv::ScopeSubgroup);
+	const auto quad_lane = EmitAndConstant(state, EmitSubgroupLocalInvocationId(state), 3u);
+	uint32_t   result    = 0;
+	for (uint32_t source = 0; source < 4u; ++source) {
+		uint32_t selects = 0;
+		for (uint32_t lane = 0; lane < 4u; ++lane) {
+			if (((control >> (lane * 2u)) & 3u) == source) {
+				const auto is_lane = Binary(state, spv::OpIEqual, TypeBool(state), quad_lane,
+				                            ConstantU32(state, lane));
+				selects = selects == 0 ? is_lane
+				                       : Binary(state, spv::OpLogicalOr, TypeBool(state), selects,
+				                                is_lane);
+			}
+		}
+		if (selects == 0) continue;
+		const auto read = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformQuadBroadcast, type, read, scope, value,
+		                          ConstantU32(state, source));
+		result = result == 0 ? read : Select(state, type, selects, read, result);
+	}
+	return result;
+}
+
 // Whether EXEC enables a source lane within the caller's 32-lane half.
 uint32_t EmitSourceLaneActive(ValueEmitContext& ctx, uint32_t exec, uint32_t lane) {
 	auto&      state  = ctx.state;
@@ -155,6 +196,10 @@ uint32_t EmitDppWriteCondition(ValueEmitContext& ctx, const IR::DppMoveFlags& fl
 	const auto target = EmitDppTargetLane(state, flags);
 	if (row_shift) {
 		writable = Binary(state, spv::OpLogicalAnd, TypeBool(state), writable, target.valid);
+	}
+	if (!flags.fetch_inactive && UseQuadDpp(ctx, flags)) {
+		return Binary(state, spv::OpLogicalAnd, TypeBool(state), writable,
+		              EmitQuadPermRead(state, TypeBool(state), exec, flags.control));
 	}
 	if (!flags.fetch_inactive) {
 		// Vacated lanes target outside their row; wrapping keeps the ballot index in range.
@@ -786,6 +831,17 @@ uint32_t EmitUndefU1(EmitterState& state, const IR::Inst& inst) {
 uint32_t EmitDppMoveU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto&      state    = ctx.state;
 	const auto flags    = inst.Flags<IR::DppMoveFlags>();
+	if (UseQuadDpp(ctx, flags)) {
+		const auto type = TypeId(state, inst.Arg(0).GetType());
+		const auto read = EmitQuadPermRead(state, type, ctx.Arg(inst, 0), flags.control);
+		if (flags.fetch_inactive) {
+			return read;
+		}
+		const auto source_active =
+		    EmitQuadPermRead(state, TypeBool(state), ctx.Arg(inst, 1), flags.control);
+		return EmitNative<spv::OpSelect, IR::Type::U32>(state, source_active, read,
+		                                                ConstantU32(state, 0));
+	}
 	const auto target   = EmitDppTargetLane(state, flags);
 	const auto shuffled = ctx.Shuffle(inst, 0, target.lane);
 	if (flags.fetch_inactive) {
