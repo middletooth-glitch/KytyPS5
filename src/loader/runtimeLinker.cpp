@@ -654,6 +654,17 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		if (access == GpuAccess::Read &&
 		    Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(info->exception_address) != 0) {
 			Libs::Graphics::ShaderRecompiler::IR::NoteSrtWalkerFault();
+			// Profile: does the walker read bytes a GPU write is pending on, or clean bytes that
+			// only share a protected page with them (no readback needed for the bytes read)?
+			if (Libs::Graphics::WaitProfile::Enabled() && !clean_reads) {
+				const auto address =
+				    Loader::X64InstructionEmulator::SrtWalkerLoadAddress(info->native_context);
+				uint32_t value = 0;
+				Libs::Graphics::WaitProfile::Event(
+				    Libs::LibKernel::Memory::TryReadCurrentBacking(address, &value, sizeof(value))
+				        ? "SRT walker fault: bytes read are clean (page shared with GPU writes)"
+				        : "SRT walker fault: bytes read have a GPU write pending");
+			}
 		}
 		if (clean_reads && access == GpuAccess::Read) {
 			if (const auto length = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(
