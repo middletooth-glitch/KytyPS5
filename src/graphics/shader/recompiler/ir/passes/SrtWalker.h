@@ -1,6 +1,7 @@
 #ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_SRTWALKER_H_
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_SRTWALKER_H_
 
+#include "common/abi.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <algorithm>
@@ -81,6 +82,12 @@ bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<ui
              std::vector<std::pair<uint64_t, uint64_t>>* reads);
 // The host exception handler saw a walker load fault (GPU-watched memory; WalkSrt memoizes).
 void NoteSrtWalkerFault();
+// Walker reads of read-watched pages (GPU writes pending somewhere on the page) call `read`
+// instead of faulting; it returns the word, reading back GPU writes only for the bytes read.
+// The view is the PageManager's (see PageManager::WatchView). KYTY_SRT_WATCHED_READS=0 off.
+using SrtWatchedRead = uint32_t KYTY_SYSV_ABI (*)(uint64_t address);
+void SetSrtWalkerWatchView(const void* regions, size_t pages_offset, uint64_t address_limit,
+                           SrtWatchedRead read);
 // Results of the last walk; false when unknown.
 bool WalkedValue(const ResourcePlan& plan, Value value, uint32_t& result);
 bool WalkedDescriptor(const ResourcePlan& plan, uint32_t source, DescriptorValue& result);

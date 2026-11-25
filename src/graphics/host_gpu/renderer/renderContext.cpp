@@ -6,10 +6,44 @@
 #include "graphics/presentation/videoOut.h"
 #include "libs/errno.h"
 #include "graphics/host_gpu/renderer/waitProfile.h"
+#include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
+#include "kernel/memory.h"
+#include "common/abi.h"
 
 #include <algorithm>
 
 namespace Libs::Graphics {
+
+namespace {
+
+// SRT walker reads of read-watched pages: bytes with no GPU write pending are read from the
+// backing, without the readback (a GPU sync) a fault would make for the whole page.
+uint32_t KYTY_SYSV_ABI SrtWalkerWatchedRead(uint64_t address) {
+	uint32_t value = 0;
+	if (LibKernel::Memory::TryReadCurrentBacking(address, &value, sizeof(value))) {
+		if (WaitProfile::Enabled()) {
+			WaitProfile::Event("SRT walker read of a watched page served from backing");
+		}
+		return value;
+	}
+	// What a faulting read does: read back the GPU write (or wait for the image write-back)
+	// until the bytes are current.
+	ShaderRecompiler::IR::NoteSrtWalkerFault();
+	for (int attempt = 0; attempt < 4; ++attempt) {
+		if (!LibKernel::Memory::HandleGpuFault(PageFaultAccess::Read, address)) {
+			break;
+		}
+		if (LibKernel::Memory::TryReadCurrentBacking(address, &value, sizeof(value))) {
+			return value;
+		}
+	}
+	if (!LibKernel::Memory::TryReadBacking(address, &value, sizeof(value))) {
+		value = 0;
+	}
+	return value;
+}
+
+} // namespace
 
 RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::path& shader_store)
     : m_graphics(graphics), m_render_executor(*this), m_command_scheduler(*this, graphics),
@@ -22,9 +56,13 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
 	if (graphics.ray_query_enabled) {
 		m_ray_tracing = std::make_unique<RayTracing>(*this);
 	}
+	const auto view = m_page_manager.GetWatchView();
+	ShaderRecompiler::IR::SetSrtWalkerWatchView(view.regions, view.pages_offset, view.address_limit,
+	                                            SrtWalkerWatchedRead);
 }
 
 RenderContext::~RenderContext() {
+	ShaderRecompiler::IR::SetSrtWalkerWatchView(nullptr, 0, 0, nullptr);
 	ShutdownGpu();
 	m_command_scheduler.Shutdown();
 }

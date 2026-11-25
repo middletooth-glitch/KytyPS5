@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -168,6 +169,14 @@ uint32_t OutputOffset(const ResourcePlan& plan) {
 const uint8_t* Scratch(const ResourcePlan& plan) {
 	return reinterpret_cast<const uint8_t*>(plan.srt_scratch.data());
 }
+
+struct WatchView {
+	const void*    regions       = nullptr;
+	size_t         pages_offset  = 0;
+	uint64_t       address_limit = 0;
+	SrtWatchedRead read          = nullptr;
+};
+WatchView g_watch_view {};
 
 thread_local const Xbyak::CodeGenerator* t_running_walker = nullptr;
 thread_local uint32_t                     t_walker_faults  = 0;
@@ -1017,8 +1026,60 @@ void WalkerCompiler::EmitRead(const Node& node) {
 			c.cmp(c.r11, c.rcx);
 			c.ja(zero, Near);
 		}
+		// A read of a read-watched page (GPU writes pending on it) calls the host, which reads
+		// back GPU writes only when the bytes read have one pending; reads of other pages load
+		// directly.
+		Xbyak::Label direct, done;
+		// The host sets the view after walkers may have been compiled, so it is read at run time
+		// (an address limit of zero sends every read to the direct load).
+		const auto view = reinterpret_cast<uint64_t>(&g_watch_view);
+		c.push(c.rcx);
+		c.push(c.r11);
+		c.mov(c.r11, view);
+		c.cmp(c.r10, c.qword[c.r11 + offsetof(WatchView, address_limit)]);
+		c.jae(direct, Near);
+		c.mov(c.rcx, c.r10);
+		c.shr(c.rcx, 22);
+		c.mov(c.r11, c.qword[c.r11 + offsetof(WatchView, regions)]);
+		c.mov(c.r11, c.qword[c.r11 + c.rcx * 8]);
+		c.test(c.r11, c.r11);
+		c.jz(direct, Near);
+		c.mov(c.rcx, view);
+		c.add(c.r11, c.qword[c.rcx + offsetof(WatchView, pages_offset)]);
+		c.mov(c.rcx, c.r10);
+		c.shr(c.rcx, 12);
+		c.and_(c.ecx, 1023u);
+		c.movzx(c.ecx, c.byte[c.r11 + c.rcx * 2 + 1]);
+		c.test(c.ecx, c.ecx);
+		c.jz(direct, Near);
+		// System V call: rdi = address; rsi, rdx and r8-r10 hold walker state.
+		c.push(c.rdx);
+		c.push(c.rsi);
+		c.push(c.rdi);
+		c.push(c.r8);
+		c.push(c.r9);
+		c.push(c.r10);
+		c.push(c.rbp);
+		c.mov(c.rbp, c.rsp);
+		c.and_(c.rsp, -16);
+		c.mov(c.rdi, c.r10);
+		c.mov(c.rax, view);
+		c.call(c.ptr[c.rax + offsetof(WatchView, read)]);
+		c.mov(c.rsp, c.rbp);
+		c.pop(c.rbp);
+		c.pop(c.r10);
+		c.pop(c.r9);
+		c.pop(c.r8);
+		c.pop(c.rdi);
+		c.pop(c.rsi);
+		c.pop(c.rdx);
+		c.jmp(done, Near);
+		c.L(direct);
 		// Every guest load is mov eax, [r10] (41 8b 02), so a fault completes it as a zero read.
 		c.mov(c.eax, c.dword[c.r10]);
+		c.L(done);
+		c.pop(c.r11);
+		c.pop(c.rcx);
 		++m_captures;
 		c.mov(c.qword[c.r8], c.r10);
 		c.add(c.r8, 8);
@@ -1453,6 +1514,15 @@ void CompileSrtWalker(ResourcePlan& plan, std::span<const Value> values) {
 
 void NoteSrtWalkerFault() {
 	++t_walker_faults;
+}
+
+void SetSrtWalkerWatchView(const void* regions, size_t pages_offset, uint64_t address_limit,
+                           SrtWatchedRead read) {
+	const char* value   = std::getenv("KYTY_SRT_WATCHED_READS");
+	const bool  enabled = value == nullptr || std::strcmp(value, "0") != 0;
+	g_watch_view = enabled && regions != nullptr && read != nullptr
+	                   ? WatchView {regions, pages_offset, address_limit, read}
+	                   : WatchView {};
 }
 
 namespace {

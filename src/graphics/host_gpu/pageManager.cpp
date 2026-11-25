@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <cstdarg>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -273,6 +274,16 @@ static_assert(std::atomic<void*>::is_always_lock_free);
 PageManager::PageManager(): m_impl(std::make_unique<Impl>()) {}
 
 PageManager::~PageManager() = default;
+
+PageManager::WatchView PageManager::GetWatchView() const {
+	static_assert(REGION_SIZE == (uint64_t {1} << 22u) && REGION_PAGES == 1024u);
+	static_assert(sizeof(std::atomic<Impl::Region*>) == sizeof(void*));
+	static_assert(offsetof(Impl::PageState, access_watchers) == 1u);
+	static const Impl::Region probe {};
+	const auto pages_offset = static_cast<size_t>(reinterpret_cast<const char*>(&probe.pages) -
+	                                              reinterpret_cast<const char*>(&probe));
+	return {m_impl->regions.get(), pages_offset, ADDRESS_SIZE};
+}
 
 template <bool track, bool is_read>
 void PageManager::UpdatePageWatchers(uint64_t vaddr, uint64_t size) {

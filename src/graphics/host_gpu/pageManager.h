@@ -23,6 +23,16 @@ public:
 	template <bool track, bool is_read = false>
 	void UpdatePageWatchersForRegion(uint64_t base_addr, RegionBits& mask);
 
+	// Lock-free view of the read-watch state for generated code: regions[address >> 22] is a
+	// region (null when none) whose byte at pages_offset + page * 2 + 1 counts the read watchers
+	// of its page ((address >> 12) & 1023). Valid below address_limit while the manager lives.
+	struct WatchView {
+		const void* regions       = nullptr;
+		size_t      pages_offset  = 0;
+		uint64_t    address_limit = 0;
+	};
+	[[nodiscard]] WatchView GetWatchView() const;
+
 private:
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;
