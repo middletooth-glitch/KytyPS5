@@ -2024,6 +2024,7 @@ void TextureCache::PrepareFullGpuWrite(uint64_t address, uint64_t size) {
 	std::scoped_lock lock {m_lock};
 	Common::SmallVector<ImageId, 8> images;
 	ForEachImageInRegion(address, size, [&](ImageId id, Image&) { images.push_back(id); });
+	uint32_t inside_count = 0, published = 0;
 	for (const auto id: images) {
 		auto&      image  = m_slot_images[id];
 		const bool inside = image.info.data.address >= address &&
@@ -2031,9 +2032,16 @@ void TextureCache::PrepareFullGpuWrite(uint64_t address, uint64_t size) {
 		if (inside) {
 			image.ClearGpuModified();
 			image.MarkBufferModified();
-		} else if (image.SafeToDownload()) {
-			(void)BcAlias::Publish(*this, image);
+			++inside_count;
+		} else if (image.SafeToDownload() && BcAlias::Publish(*this, image)) {
+			++published;
 		}
+	}
+	static std::atomic<uint32_t> logged {0};
+	if (!images.empty() && logged.fetch_add(1, std::memory_order_relaxed) < 32u) {
+		std::printf("Full GPU write 0x%016llx+0x%llx: %zu images, %u inside, %u published\n",
+		            static_cast<unsigned long long>(address), static_cast<unsigned long long>(size),
+		            images.size(), inside_count, published);
 	}
 }
 
