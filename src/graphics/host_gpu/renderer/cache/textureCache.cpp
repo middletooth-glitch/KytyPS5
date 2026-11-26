@@ -2013,6 +2013,30 @@ void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size, bool
 	});
 }
 
+void TextureCache::PrepareFullGpuWrite(uint64_t address, uint64_t size) {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_GPU_WRITE_IMAGES");
+		return value == nullptr || std::strcmp(value, "exact") != 0;
+	}();
+	if (!enabled) {
+		return;
+	}
+	std::scoped_lock lock {m_lock};
+	Common::SmallVector<ImageId, 8> images;
+	ForEachImageInRegion(address, size, [&](ImageId id, Image&) { images.push_back(id); });
+	for (const auto id: images) {
+		auto&      image  = m_slot_images[id];
+		const bool inside = image.info.data.address >= address &&
+		                    image.info.data.End() <= address + size;
+		if (inside) {
+			image.ClearGpuModified();
+			image.MarkBufferModified();
+		} else if (image.SafeToDownload()) {
+			(void)BcAlias::Publish(*this, image);
+		}
+	}
+}
+
 bool TextureCache::CopyToImage(uint64_t address, uint64_t source, uint64_t size) {
 	std::scoped_lock lock {m_lock};
 	Common::SmallVector<ImageId, 8> targets;
