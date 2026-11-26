@@ -39,6 +39,9 @@
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #include <windows.h>
+// clang-format off
+#include <tlhelp32.h>
+// clang-format on
 #else
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -634,6 +637,120 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 	return true;
 }
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+// Diagnostic for guest watchdogs: when the game kills itself because some thread stopped making
+// progress, the faulting thread is only the messenger. Snapshot every other thread of the process
+// (rip/rsp plus the guest return addresses found on its stack) so the stuck one can be located.
+// Each thread is suspended only while its context and stack are copied into static buffers; all
+// printing happens after it resumes, so a thread holding the CRT or heap lock cannot deadlock us.
+struct ThreadDumpEntry {
+	DWORD    tid;
+	uint64_t rip;
+	uint64_t rsp;
+	uint64_t rbp;
+	uint32_t ret_count;
+	uint64_t rets[24];
+	uint64_t ret_slots[24];
+};
+
+static bool LooksLikeGuestReturn(uint64_t r) {
+	if (r < 0x800000000ull || r >= 0x1000000000ull) {
+		return false;
+	}
+	if (!IsReadableRange(r - 8, 8)) {
+		return false;
+	}
+	const auto* b = reinterpret_cast<const uint8_t*>(r);
+	if (b[-5] == 0xe8) return true;                                   // call rel32
+	if (b[-2] == 0xff && (b[-1] & 0xf8) == 0xd0) return true;         // call reg
+	if (b[-3] == 0x41 && b[-2] == 0xff && (b[-1] & 0xf8) == 0xd0) return true;
+	if (b[-6] == 0xff && b[-5] == 0x15) return true;                  // call [rip+d32]
+	if (b[-3] == 0xff && (b[-2] & 0x38) == 0x10 && (b[-2] & 0xc0) == 0x40) return true; // call [r+d8]
+	if (b[-4] == 0xff && (b[-3] & 0x38) == 0x10 && (b[-3] & 0xc0) == 0x40) return true; // call [r+sib+d8]
+	if (b[-6] == 0xff && (b[-5] & 0x38) == 0x10 && (b[-5] & 0xc0) == 0x80) return true; // call [r+d32]
+	if (b[-7] == 0xff && (b[-6] & 0x38) == 0x10 && (b[-6] & 0xc0) == 0x80) return true; // call [r+sib+d32]
+	return false;
+}
+
+static void DumpAllThreads() {
+	static ThreadDumpEntry entries[256];
+	static uint64_t        stack_copy[8192]; // 64 KiB of each stack
+	uint32_t               count = 0;
+	const DWORD            self  = GetCurrentThreadId();
+	const DWORD            pid   = GetCurrentProcessId();
+	HANDLE                 snap  = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+	if (snap == INVALID_HANDLE_VALUE) {
+		return;
+	}
+	THREADENTRY32 te {};
+	te.dwSize = sizeof(te);
+	for (BOOL ok = Thread32First(snap, &te); ok != FALSE && count < 256; ok = Thread32Next(snap, &te)) {
+		if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) {
+			continue;
+		}
+		HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE,
+		                      te.th32ThreadID);
+		if (h == nullptr) {
+			continue;
+		}
+		if (SuspendThread(h) != static_cast<DWORD>(-1)) {
+			CONTEXT ctx {};
+			ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+			if (GetThreadContext(h, &ctx) != FALSE) {
+				auto& e     = entries[count++];
+				e.tid       = te.th32ThreadID;
+				e.rip       = ctx.Rip;
+				e.rsp       = ctx.Rsp;
+				e.rbp       = ctx.Rbp;
+				e.ret_count = 0;
+				SIZE_T got  = 0;
+				uint64_t want = sizeof(stack_copy);
+				// Copy as much of the stack as can be read; ReadProcessMemory never faults.
+				while (want >= 4096 &&
+				       ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(ctx.Rsp), stack_copy,
+				                         static_cast<SIZE_T>(want), &got) == FALSE) {
+					want /= 2;
+					got = 0;
+				}
+				for (SIZE_T i = 0; i < got / 8 && e.ret_count < 24; i++) {
+					if (LooksLikeGuestReturn(stack_copy[i])) {
+						e.ret_slots[e.ret_count] = ctx.Rsp + i * 8;
+						e.rets[e.ret_count++]    = stack_copy[i];
+					}
+				}
+			}
+			ResumeThread(h);
+		}
+		CloseHandle(h);
+	}
+	CloseHandle(snap);
+
+	std::printf("--- All threads (host tid -> rip, guest return addresses on stack) ---\n");
+	for (uint32_t t = 0; t < count; t++) {
+		const auto& e = entries[t];
+		HMODULE     module = nullptr;
+		char        path[MAX_PATH] = "";
+		const char* base           = "guest";
+		uint64_t    off            = e.rip;
+		if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		                       reinterpret_cast<LPCSTR>(e.rip), &module) != 0 &&
+		    GetModuleFileNameA(module, path, sizeof(path)) != 0) {
+			base = path;
+			for (const char* c = path; *c != '\0'; c++) {
+				if (*c == '\\' || *c == '/') base = c + 1;
+			}
+			off = e.rip - reinterpret_cast<uint64_t>(module);
+		}
+		std::printf("tid=%lu rip=0x%016" PRIx64 " (%s+0x%" PRIx64 ") rsp=0x%016" PRIx64 " rbp=0x%016" PRIx64 "\n",
+		            e.tid, e.rip, base, off, e.rsp, e.rbp);
+		for (uint32_t i = 0; i < e.ret_count; i++) {
+			std::printf("    [rsp+0x%05" PRIx64 "] 0x%016" PRIx64 "\n", e.ret_slots[i] - e.rsp, e.rets[i]);
+		}
+	}
+	std::fflush(stdout);
+}
+#endif
+
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
@@ -773,6 +890,9 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			            reinterpret_cast<uint64_t>(frames[i]) - reinterpret_cast<uint64_t>(module));
 		}
 		std::fflush(stdout);
+	}
+	if (const char* v = std::getenv("KYTY_DUMP_THREADS"); v == nullptr || v[0] != '0') {
+		DumpAllThreads();
 	}
 #endif
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64
