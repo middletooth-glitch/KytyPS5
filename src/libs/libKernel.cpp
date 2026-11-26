@@ -3183,8 +3183,8 @@ LIB_DEFINE(InitLibKernel_1_Mem) {
 	LIB_FUNC("rVjRvHJ0X6c", Memory::KernelVirtualQuery);
 	LIB_FUNC("yDBwVAolDgg", Memory::KernelIsStack);
 	LIB_FUNC("7oxv3PPCumo", Memory::KernelReserveVirtualRange);
-	LIB_FUNC("yu17wG8L5FI", KernelHasTrinityMode);
-	LIB_FUNC("X0HkB92+NRE", KernelIsAuthenticTrinity);
+	LIB_FUNC("yu17wG8L5FI", LibKernel::KernelHasTrinityMode);
+	LIB_FUNC("X0HkB92+NRE", LibKernel::KernelIsAuthenticTrinity);
 	LIB_FUNC("L-Q3LEjIbgA", Memory::KernelMapDirectMemory);
 	LIB_FUNC("BQQniolj9tQ", Memory::KernelMapDirectMemory2);
 	LIB_FUNC("NcaWUxfMNIQ", Memory::KernelMapNamedDirectMemory);
