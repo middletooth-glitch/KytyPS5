@@ -597,6 +597,22 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
 
+	// Demon's Souls clears ranges holding render targets with a compute fill (one 16-byte store
+	// per thread over every record). The clear is newer than the images' own GPU writes, so
+	// images inside it take the cleared data.
+	if (program.shader_hash == 0x444dcb1ad39517daull && !use_thread_dimensions && mode == 0x41u &&
+	    thread_group_y == 1 && thread_group_z == 1 && cs_regs.cs_regs.num_thread_x == 64 &&
+	    cs_regs.cs_regs.num_thread_y <= 1 && cs_regs.cs_regs.num_thread_z <= 1 &&
+	    cs_regs.cs_regs.user_sgpr == 8 && cs_regs.cs_regs.tgid_x_en) {
+		ShaderBufferResource target;
+		std::copy_n(cs_regs.cs_user_sgpr.value, 4, target.fields);
+		if (target.Base48() != 0 && target.Stride() == 16 && !target.SwizzleEnabled() &&
+		    uint64_t {thread_group_x} * 64u >= target.NumRecords()) {
+			m_context.GetTextureCache().InvalidateMemoryFromGPU(target.Base48(), target.GetSize(),
+			                                                     true);
+		}
+	}
+
 	if (mirror) {
 		LibKernel::Memory::WriteBacking(mirror->destination, mirror->values.data(),
 		                                mirror->values.size() * sizeof(uint32_t));

@@ -1976,7 +1976,7 @@ uint64_t TextureCache::WriteBackTick(uint64_t address, uint64_t size) {
 	return tick;
 }
 
-void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
+void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size, bool full_write) {
 	// A GPU buffer write also refreshes images it overlaps at other addresses when they hold no
 	// GPU writes of their own (Demon's Souls clears a 15 MB range holding an R32Uint image), so
 	// they do not keep the contents from before the write. KYTY_GPU_WRITE_IMAGES=exact limits
@@ -1988,7 +1988,9 @@ void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
 	static std::atomic<uint32_t> logged {0};
 	std::scoped_lock lock {m_lock};
 	ForEachImageInRegion(address, size, [&](ImageId, Image& image) {
-		if (image.info.data.address == address) {
+		const bool inside = image.info.data.address >= address &&
+		                    image.info.data.End() <= address + size;
+		if (image.info.data.address == address || (overlap && full_write && inside)) {
 			image.ClearGpuModified();
 			image.MarkBufferModified();
 			return;
