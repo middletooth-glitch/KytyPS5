@@ -481,19 +481,27 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		const bool full =
 		    !use_thread_dimensions && thread_group_y == 1 && thread_group_z == 1 &&
 		    cs_regs.cs_regs.num_thread_x == 64 && cs_regs.cs_regs.num_thread_y <= 1 &&
-		    cs_regs.cs_regs.num_thread_z <= 1 && target.Base48() != 0 && target.Stride() != 0 &&
-		    !target.SwizzleEnabled() && uint64_t {thread_group_x} * 64u >= target.NumRecords();
+		    cs_regs.cs_regs.num_thread_z <= 1 && target.Base48() != 0 &&
+		    // Every byte: each element is one 16-byte store (a wider stride leaves gaps). Swizzled
+		    // layouts move the elements but still cover the range when every index is stored.
+		    target.Stride() == 16 &&
+		    (target.Format() == Prospero::BufferFormat::k32_32_32_32UInt ||
+		     target.Format() == Prospero::BufferFormat::k32_32_32_32SInt ||
+		     target.Format() == Prospero::BufferFormat::k32_32_32_32Float) &&
+		    uint64_t {thread_group_x} * 64u >= target.NumRecords();
 		static std::atomic<uint32_t> logged {0};
 		if (logged.fetch_add(1, std::memory_order_relaxed) < 16u) {
 			std::printf("Compute clear 0x%016llx: groups=%ux%ux%u threads=%ux%ux%u sgprs=%u tgid=%d "
-			            "stride=%u records=%u size=0x%llx full=%d\n",
+			            "stride=%u records=%u size=0x%llx format=%u swizzle=%d full=%d\n",
 			            static_cast<unsigned long long>(target.Base48()), thread_group_x,
 			            thread_group_y, thread_group_z, cs_regs.cs_regs.num_thread_x,
 			            cs_regs.cs_regs.num_thread_y, cs_regs.cs_regs.num_thread_z,
 			            cs_regs.cs_regs.user_sgpr, cs_regs.cs_regs.tgid_x_en ? 1 : 0,
 			            static_cast<uint32_t>(target.Stride()),
 			            static_cast<uint32_t>(target.NumRecords()),
-			            static_cast<unsigned long long>(target.GetSize()), full ? 1 : 0);
+			            static_cast<unsigned long long>(target.GetSize()),
+			            static_cast<uint32_t>(target.Format()), target.SwizzleEnabled() ? 1 : 0,
+			            full ? 1 : 0);
 		}
 		if (full) {
 			m_context.GetTextureCache().PrepareFullGpuWrite(target.Base48(), target.GetSize());
