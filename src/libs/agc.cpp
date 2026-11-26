@@ -3005,6 +3005,19 @@ uint32_t KYTY_SYSV_ABI AgcAcbJumpGetSize() {
 	return 0x10u;
 }
 
+// Packet sizes in bytes, matching the packets the writers emit (GTA VI asks for them).
+uint32_t KYTY_SYSV_ABI AgcAcbRewindGetSize() {
+	return 8u;
+}
+
+uint32_t KYTY_SYSV_ABI AgcAcbEventWriteGetSize() {
+	return 8u;
+}
+
+uint32_t KYTY_SYSV_ABI AgcDcbStallCommandBufferParserGetSize() {
+	return 8u;
+}
+
 uint32_t* KYTY_SYSV_ABI AgcAcbRewind(CommandBuffer* buf, uint8_t initial_state, uint8_t offload) {
 	auto* cmd = AgcDcbRewind(buf, initial_state);
 	if (cmd != nullptr) {
