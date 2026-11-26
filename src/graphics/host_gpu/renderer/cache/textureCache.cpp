@@ -1977,11 +1977,13 @@ uint64_t TextureCache::WriteBackTick(uint64_t address, uint64_t size) {
 }
 
 void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
-	// Experiment (KYTY_GPU_WRITE_IMAGES=overlap): a GPU buffer write also refreshes images it
-	// overlaps at other addresses, when they hold no GPU writes of their own.
+	// A GPU buffer write also refreshes images it overlaps at other addresses when they hold no
+	// GPU writes of their own (Demon's Souls clears a 15 MB range holding an R32Uint image), so
+	// they do not keep the contents from before the write. KYTY_GPU_WRITE_IMAGES=exact limits
+	// it to images starting at the write.
 	static const bool overlap = [] {
 		const char* value = std::getenv("KYTY_GPU_WRITE_IMAGES");
-		return value != nullptr && std::strcmp(value, "overlap") == 0;
+		return value == nullptr || std::strcmp(value, "exact") != 0;
 	}();
 	static std::atomic<uint32_t> logged {0};
 	std::scoped_lock lock {m_lock};
