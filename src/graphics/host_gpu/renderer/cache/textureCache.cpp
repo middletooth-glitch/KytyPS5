@@ -2038,7 +2038,7 @@ void TextureCache::PrepareFullGpuWrite(uint64_t address, uint64_t size) {
 		}
 	}
 	static std::atomic<uint32_t> logged {0};
-	if (!images.empty() && logged.fetch_add(1, std::memory_order_relaxed) < 32u) {
+	if (images.size() != 0 && logged.fetch_add(1, std::memory_order_relaxed) < 32u) {
 		std::printf("Full GPU write 0x%016llx+0x%llx: %zu images, %u inside, %u published\n",
 		            static_cast<unsigned long long>(address), static_cast<unsigned long long>(size),
 		            images.size(), inside_count, published);
