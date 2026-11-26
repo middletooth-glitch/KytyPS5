@@ -821,6 +821,9 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 		return;
 	}
 
+	// A fill writes every byte, after the GPU writes of the images it covers (Demon's Souls
+	// clears ranges of an aliased render target pool this way).
+	m_texture_cache.PrepareFullGpuWrite(vaddr, size);
 	m_texture_cache.InvalidateMemoryFromGPU(vaddr, size);
 	auto [dst, dst_offset] = ObtainBuffer(vaddr, size, true, true);
 	dst->Fill(dst_offset, size, value);
