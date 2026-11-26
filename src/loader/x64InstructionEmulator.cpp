@@ -729,6 +729,24 @@ static bool TryEmulateCpuExtensions(Context& context) {
 	return true;
 }
 
+// AMD CLZERO (0F 01 FC, optional 67 prefix): zero the 64-byte line holding [rAX].
+static bool TryEmulateClzero(Context& context) {
+	const auto* rip    = reinterpret_cast<const uint8_t*>(context.Rip());
+	const bool  addr32 = rip[0] == 0x67;
+	const auto* code   = rip + (addr32 ? 1 : 0);
+	if (code[0] != 0x0f || code[1] != 0x01 || code[2] != 0xfc) {
+		return false;
+	}
+	uint64_t address = static_cast<uint64_t>(context.Gpr(0));
+	if (addr32) {
+		address &= 0xffffffffu;
+	}
+	std::memset(reinterpret_cast<void*>(address & ~uint64_t {63}), 0, 64);
+	LogFirstTrap(context, ZYDIS_MNEMONIC_CLZERO);
+	context.Advance(addr32 ? 4 : 3);
+	return true;
+}
+
 static bool TryEmulateMonitorxMwaitx(Context& context) {
 	const auto* rip = reinterpret_cast<const uint8_t*>(context.Rip());
 	if (rip[0] != 0x0f || rip[1] != 0x01 || (rip[2] != 0xfa && rip[2] != 0xfb)) {
@@ -832,6 +850,7 @@ bool TryEmulate(void* native_context) {
 	Context context {static_cast<ucontext_t*>(native_context)};
 #endif
 	return TryEmulateReciprocalSquareRoot(context) || TryEmulateMonitorxMwaitx(context) ||
+	       TryEmulateClzero(context) ||
 	       TryEmulateSse4a(context) ||
 #if !defined(__APPLE__)
 	       TryEmulateShaNi(context) ||

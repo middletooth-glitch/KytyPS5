@@ -134,7 +134,8 @@ enum class InstructionReplacement {
 	InsertQ,
 	ReadProcessorId,
 	CacheLineWriteBack,
-	ReadTimeStampCounter
+	ReadTimeStampCounter,
+	CacheLineZero
 };
 
 struct InstructionRewrite {
@@ -152,6 +153,7 @@ InstructionPatchCounts& ReplacementCounts(GuestInstructionPatchResult& result,
 		case InstructionReplacement::InsertQ: return result.insertq;
 		case InstructionReplacement::ReadProcessorId: return result.rdpid;
 		case InstructionReplacement::ReadTimeStampCounter: return result.rdtsc;
+		case InstructionReplacement::CacheLineZero: return result.clzero;
 		default: return result.clwb;
 	}
 }
@@ -1047,6 +1049,26 @@ bool IsSupportedBitFieldInstruction(const DecodedCodeInstruction& decoded) {
 	       decoded.instruction.length == opcode + (immediate ? 5 : 3);
 }
 
+// AMD CLZERO: zero the 64-byte line holding [rAX]. GTA VI clears memory with it; Intel hosts
+// lack it.
+void GenerateCacheLineZero(const DecodedCodeInstruction& decoded, Xbyak::CodeGenerator& generator) {
+	generator.lea(rsp, ptr[rsp - GuestRedZoneSize]);
+	generator.pushfq();
+	generator.push(rdi);
+	if (decoded.instruction.address_width == 32) {
+		generator.mov(edi, eax);
+	} else {
+		generator.mov(rdi, rax);
+	}
+	generator.and_(rdi, -64);
+	for (int offset = 0; offset < 64; offset += 8) {
+		generator.mov(qword[rdi + offset], 0);
+	}
+	generator.pop(rdi);
+	generator.popfq();
+	generator.lea(rsp, ptr[rsp + GuestRedZoneSize]);
+}
+
 void GenerateExtractQ(const DecodedCodeInstruction& decoded, Xbyak::CodeGenerator& generator) {
 	const Xbyak::Xmm destination(decoded.operands[0].reg.value - ZYDIS_REGISTER_XMM0);
 	// Keep spills below the guest red zone on both hosts, and restore all modified flags/GPRs.
@@ -1107,6 +1129,8 @@ void CollectAmdInstructions(const DecodedFunction&                   function,
 			replacement = InstructionReplacement::ReadProcessorId;
 		} else if (!host_features.clwb && instruction.mnemonic == ZYDIS_MNEMONIC_CLWB) {
 			replacement = InstructionReplacement::CacheLineWriteBack;
+		} else if (!host_features.clzero && instruction.mnemonic == ZYDIS_MNEMONIC_CLZERO) {
+			replacement = InstructionReplacement::CacheLineZero;
 		} else {
 			continue;
 		}
@@ -1261,6 +1285,8 @@ void RelocateGuestInstructions(PatchModule* module, const DecodedFunction& funct
 						GenerateExtractQ(*decoded, generator);
 					} else if (replacement == InstructionReplacement::ReadTimeStampCounter) {
 						GenerateReadTimeStampCounter(*decoded, tsc_multiplier, generator);
+					} else if (replacement == InstructionReplacement::CacheLineZero) {
+						GenerateCacheLineZero(*decoded, generator);
 					} else {
 						// CLFLUSH writes back dirty data too; invalidation is a permitted stronger
 						// action.
@@ -1695,8 +1721,14 @@ GuestInstructionHostFeatures GetGuestInstructionHostFeatures() {
 			Xbyak::util::Cpu::getCpuidEx(7, 0, leaf);
 			rdpid = (leaf[2] & (1u << 22)) != 0;
 		}
+		bool clzero = false;
+		Xbyak::util::Cpu::getCpuid(0x80000000u, leaf);
+		if (leaf[0] >= 0x80000008u) {
+			Xbyak::util::Cpu::getCpuid(0x80000008u, leaf);
+			clzero = (leaf[1] & 1u) != 0;
+		}
 		return GuestInstructionHostFeatures {cpu.has(Xbyak::util::Cpu::tSSE4a), rdpid,
-		                                     cpu.has(Xbyak::util::Cpu::tCLWB)};
+		                                     cpu.has(Xbyak::util::Cpu::tCLWB), clzero};
 	}();
 	return features;
 }
