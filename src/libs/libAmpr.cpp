@@ -26,6 +26,7 @@
 #include <unordered_map>
 #include <atomic>
 #include <cinttypes>
+#include <cstdio>
 #include <iterator>
 #include <variant>
 #include <vector>
@@ -2259,6 +2260,34 @@ static int KYTY_SYSV_ABI AmmCommandBufferMapDirectWithGpuMaskId(void* command_bu
 	           : LibKernel::KERNEL_ERROR_EBUSY;
 }
 
+// GTA VI (PPSA38500). Backs a PRT range with physical pages; recorded as an automatic map of the
+// range. The argument layout after the size is not confirmed: it is taken as Map's (type, prot)
+// and logged.
+static int KYTY_SYSV_ABI AmmCommandBufferAllocatePaForPrt(void* command_buffer, uint64_t va,
+                                                         uint64_t size, uint64_t arg3,
+                                                         uint64_t arg4, uint64_t arg5) {
+	PRINT_NAME();
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 32u) {
+		std::printf("AmmCommandBufferAllocatePaForPrt: cb=%p va=0x%016" PRIx64 " size=0x%" PRIx64
+		            " a3=0x%" PRIx64 " a4=0x%" PRIx64 " a5=0x%" PRIx64 "\n",
+		            command_buffer, va, size, arg3, arg4, arg5);
+	}
+	if (command_buffer == nullptr || !ValidateAmmMapArgs(va, size)) {
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	CommandBufferState::AmmMapCommand command {};
+	command.kind = AmmCommandKind::MapAuto;
+	command.va   = va;
+	command.size = size;
+	command.type = arg3 <= 16u ? static_cast<int32_t>(arg3) : 0;
+	command.prot = arg4 != 0 && arg4 < 0x400u ? static_cast<int32_t>(arg4) : 0x33;
+	return AppendCommandRecord(reinterpret_cast<uint64_t>(command_buffer), command,
+	                           AMM_MAP_RECORD_SIZE)
+	           ? OK
+	           : LibKernel::KERNEL_ERROR_EBUSY;
+}
+
 static int KYTY_SYSV_ABI AmmCommandBufferMapAsPrt(void* command_buffer, uint64_t va,
                                                   uint64_t size) {
 	PRINT_NAME();
@@ -2529,6 +2558,7 @@ LIB_DEFINE(InitAmpr_1) {
 	LIB_FUNC("8TBE+9XCZbI", Ampr::AmmCommandBufferMapDirect);
 	LIB_FUNC("kOfZlhbVAkc", Ampr::AmmCommandBufferMapDirectWithGpuMaskId);
 	LIB_FUNC("ZJCgt+aPHAU", Ampr::AmmCommandBufferMapAsPrt);
+	LIB_FUNC("d3lKWPM6odc", Ampr::AmmCommandBufferAllocatePaForPrt);
 	LIB_FUNC("0Xo9g4goDXU", Ampr::AmmCommandBufferRemapIntoPrt);
 	LIB_FUNC("3A2X6OCHtnA", Ampr::AmmCommandBufferUnmapToPrt);
 	LIB_FUNC("M-VFI2DJWQA", Ampr::AmmCommandBufferUnmap);

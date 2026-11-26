@@ -353,6 +353,15 @@ void SetProgName(const std::string& name) {
 	strncpy(g_progname_buf, name.c_str(), PROGNAME_MAX_SIZE);
 }
 
+// PS5 Pro ("Trinity") checks: the emulated console is a base PS5.
+static KYTY_SYSV_ABI int KernelHasTrinityMode() {
+	return 0;
+}
+
+static KYTY_SYSV_ABI int KernelIsAuthenticTrinity() {
+	return 0;
+}
+
 static KYTY_SYSV_ABI int* get_error_addr() {
 	return Posix::GetErrorAddr();
 }
@@ -3174,6 +3183,8 @@ LIB_DEFINE(InitLibKernel_1_Mem) {
 	LIB_FUNC("rVjRvHJ0X6c", Memory::KernelVirtualQuery);
 	LIB_FUNC("yDBwVAolDgg", Memory::KernelIsStack);
 	LIB_FUNC("7oxv3PPCumo", Memory::KernelReserveVirtualRange);
+	LIB_FUNC("yu17wG8L5FI", KernelHasTrinityMode);
+	LIB_FUNC("X0HkB92+NRE", KernelIsAuthenticTrinity);
 	LIB_FUNC("L-Q3LEjIbgA", Memory::KernelMapDirectMemory);
 	LIB_FUNC("BQQniolj9tQ", Memory::KernelMapDirectMemory2);
 	LIB_FUNC("NcaWUxfMNIQ", Memory::KernelMapNamedDirectMemory);
