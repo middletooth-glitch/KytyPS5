@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -474,14 +475,27 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	// fill (one 16-byte store per thread over every record). The clear is newer than the images'
 	// own GPU writes: images inside it take the cleared data, and images reaching past it first
 	// publish their contents so they keep the bytes outside it.
-	if (program.shader_hash == 0x444dcb1ad39517daull && !use_thread_dimensions && mode == 0x41u &&
-	    thread_group_y == 1 && thread_group_z == 1 && cs_regs.cs_regs.num_thread_x == 64 &&
-	    cs_regs.cs_regs.num_thread_y <= 1 && cs_regs.cs_regs.num_thread_z <= 1 &&
-	    cs_regs.cs_regs.user_sgpr == 8 && cs_regs.cs_regs.tgid_x_en) {
+	if (program.shader_hash == 0x444dcb1ad39517daull) {
 		ShaderBufferResource target;
 		std::copy_n(cs_regs.cs_user_sgpr.value, 4, target.fields);
-		if (target.Base48() != 0 && target.Stride() == 16 && !target.SwizzleEnabled() &&
-		    uint64_t {thread_group_x} * 64u >= target.NumRecords()) {
+		const bool full =
+		    !use_thread_dimensions && thread_group_y == 1 && thread_group_z == 1 &&
+		    cs_regs.cs_regs.num_thread_x == 64 && cs_regs.cs_regs.num_thread_y <= 1 &&
+		    cs_regs.cs_regs.num_thread_z <= 1 && target.Base48() != 0 && target.Stride() != 0 &&
+		    !target.SwizzleEnabled() && uint64_t {thread_group_x} * 64u >= target.NumRecords();
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 16u) {
+			std::printf("Compute clear 0x%016llx: groups=%ux%ux%u threads=%ux%ux%u sgprs=%u tgid=%d "
+			            "stride=%u records=%u size=0x%llx full=%d\n",
+			            static_cast<unsigned long long>(target.Base48()), thread_group_x,
+			            thread_group_y, thread_group_z, cs_regs.cs_regs.num_thread_x,
+			            cs_regs.cs_regs.num_thread_y, cs_regs.cs_regs.num_thread_z,
+			            cs_regs.cs_regs.user_sgpr, cs_regs.cs_regs.tgid_x_en ? 1 : 0,
+			            static_cast<uint32_t>(target.Stride()),
+			            static_cast<uint32_t>(target.NumRecords()),
+			            static_cast<unsigned long long>(target.GetSize()), full ? 1 : 0);
+		}
+		if (full) {
 			m_context.GetTextureCache().PrepareFullGpuWrite(target.Base48(), target.GetSize());
 		}
 	}

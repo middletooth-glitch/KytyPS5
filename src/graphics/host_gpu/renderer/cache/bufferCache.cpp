@@ -814,6 +814,10 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 		EXIT("BufferCache: invalid fill memory address\n");
 	}
 	(void)m_texture_cache.ClearMeta(vaddr);
+	// A fill writes every byte, after the GPU writes of the images it covers (Demon's Souls
+	// clears ranges of an aliased render target pool this way). Images reaching past it publish
+	// first, which leaves the range GPU-written, so the fill then runs on the GPU.
+	m_texture_cache.PrepareFullGpuWrite(vaddr, size);
 	if (!IsRegionGpuModified(vaddr, size)) {
 		// Access the guest mapping so write faults invalidate cached buffers and images.
 		auto* destination = reinterpret_cast<uint32_t*>(vaddr);
@@ -821,9 +825,6 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 		return;
 	}
 
-	// A fill writes every byte, after the GPU writes of the images it covers (Demon's Souls
-	// clears ranges of an aliased render target pool this way).
-	m_texture_cache.PrepareFullGpuWrite(vaddr, size);
 	m_texture_cache.InvalidateMemoryFromGPU(vaddr, size);
 	auto [dst, dst_offset] = ObtainBuffer(vaddr, size, true, true);
 	dst->Fill(dst_offset, size, value);
