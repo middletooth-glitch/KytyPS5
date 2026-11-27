@@ -141,10 +141,17 @@ uint32_t GuardLoopCondition(ValueEmitContext& ctx, const IR::Block* block, uint3
 		stay = 1;
 	} else if (is_back_edge(term.false_block) && !is_back_edge(term.true_block)) {
 		stay = -1;
-	} else if (term.loop_header && term.merge_block != nullptr) {
-		if (term.false_block == term.merge_block && term.true_block != term.merge_block) {
+	} else {
+		// The header's exit test, or a break from inside the body to a loop's merge block.
+		if (term.loop_header && term.merge_block != nullptr) {
+			ctx.state.loop_merge_blocks.insert(term.merge_block);
+		}
+		const auto is_exit = [&](const IR::Block* target) {
+			return target != nullptr && ctx.state.loop_merge_blocks.contains(target);
+		};
+		if (is_exit(term.false_block) && !is_exit(term.true_block)) {
 			stay = 1;
-		} else if (term.true_block == term.merge_block && term.false_block != term.merge_block) {
+		} else if (is_exit(term.true_block) && !is_exit(term.false_block)) {
 			stay = -1;
 		}
 	}
@@ -168,6 +175,7 @@ void EmitStructuredTerminator(ValueEmitContext& ctx, const IR::Block* block) {
 		if (term.loop_header) {
 			const auto* merge = term.merge_block;
 			const auto* cont  = term.continue_block;
+			if (merge != nullptr) ctx.state.loop_merge_blocks.insert(merge);
 			if (merge != nullptr && cont != nullptr) {
 				ctx.state.builder.AddFunction(spv::OpLoopMerge, merge->Definition(),
 				                              cont->Definition(), spv::LoopControlMaskNone);

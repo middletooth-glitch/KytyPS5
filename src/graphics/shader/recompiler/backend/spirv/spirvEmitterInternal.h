@@ -9,6 +9,7 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
+#include <unordered_set>
 #include <algorithm>
 #include <array>
 #include <cinttypes>
@@ -171,6 +172,8 @@ struct EmitterState {
 	std::vector<uint32_t>      interface_variables;
 	// KYTY_LOOP_GUARD: per-invocation count of loop iterations (Private u32), 0 until used.
 	uint32_t loop_guard_variable = 0;
+	// Merge blocks of the loops emitted so far: a branch to one is a loop exit the guard can take.
+	std::unordered_set<const void*> loop_merge_blocks;
 };
 
 uint32_t TypeVoid(EmitterState& state);
