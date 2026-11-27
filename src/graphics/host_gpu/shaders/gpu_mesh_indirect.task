@@ -23,6 +23,12 @@ layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer Par
 	uint     max_groups;
 	uint     max_instances;
 	uint     max_total;
+	// KYTY_GPU_BREADCRUMBS: where to write the record this shader read (0: nowhere).
+	uint     capture_tag;
+	uint64_t capture;
+};
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer Capture {
+	uint dwords[8];
 };
 layout(push_constant) uniform Push {
 	Params params;
@@ -52,10 +58,24 @@ void main() {
 	payload[5] = record.dwords[base + 1];
 	uint groups =
 	    count < params.primitive_size ? 0 : (count - params.primitive_size) / params.group_step + 1;
+	const uint requested = groups;
 	// Past the host launch limits, where direct draws exit, the record draws nothing.
 	if (groups > params.max_groups || instances > params.max_instances ||
 	    uint64_t(groups) * instances > params.max_total) {
 		groups = 0;
+	}
+	if (params.capture != 0 && gl_WorkGroupID.x == 0) {
+		// Diagnostic: the record as read here, and the groups it asked for and got.
+		Capture capture = Capture(params.capture);
+		capture.dwords[1] = record.dwords[0];
+		capture.dwords[2] = record.dwords[1];
+		capture.dwords[3] = record.dwords[2];
+		capture.dwords[4] = record.dwords[3];
+		capture.dwords[5] = params.index_size != 0 ? record.dwords[4] : 0u;
+		capture.dwords[6] = requested;
+		capture.dwords[7] = groups;
+		memoryBarrierBuffer();
+		capture.dwords[0] = params.capture_tag;
 	}
 	EmitMeshTasksEXT(groups, instances, 1);
 }

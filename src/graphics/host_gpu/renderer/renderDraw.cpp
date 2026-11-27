@@ -32,6 +32,7 @@
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 
+#include <cstddef>
 #include <algorithm>
 #include <cstdlib>
 #include <array>
@@ -625,7 +626,11 @@ struct MeshTaskParams {
 	uint32_t          max_groups     = 0;
 	uint32_t          max_instances  = 0;
 	uint32_t          max_total      = 0;
+	// KYTY_GPU_BREADCRUMBS: where the task shader writes the record it read (0: nowhere).
+	uint32_t          capture_tag    = 0;
+	vk::DeviceAddress capture        = 0;
 };
+static_assert(offsetof(MeshTaskParams, capture) == 56);
 
 struct PreparedIndexBuffer {
 	vk::Buffer     buffer = nullptr;
@@ -1144,8 +1149,9 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	const auto rendering = AcquireRenderTargets(buffer, m_targets.colors, m_targets.color_count,
 	                                            m_targets.depth, feedback_aspects, stages);
 	vk::DeviceAddress task_params = 0;
+	uint32_t          capture_tag = 0;
 	if (mesh_task) {
-		const MeshTaskParams params {
+		MeshTaskParams params {
 		    .records        = args_buffer.first->BufferDeviceAddress() + args_buffer.second,
 		    .index_address  = mesh_indices,
 		    .stride         = emit.indirect.stride,
@@ -1157,6 +1163,19 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		    .max_instances  = limits.maxMeshWorkGroupCount[1],
 		    .max_total      = std::min(limits.maxMeshWorkGroupTotalCount, MeshTaskTotalCap()),
 		};
+		if (GpuBreadcrumbs::Enabled()) {
+			const GpuBreadcrumbs::MeshCapture cpu {.guest_args     = emit.indirect.address,
+			                                       .records        = params.records,
+			                                       .index_address  = params.index_address,
+			                                       .stride         = params.stride,
+			                                       .index_size     = params.index_size,
+			                                       .index_limit    = params.index_limit,
+			                                       .primitive_size = params.primitive_size,
+			                                       .group_step     = params.group_step,
+			                                       .max_total      = params.max_total};
+			params.capture     = GpuBreadcrumbs::ReserveMeshCapture(cpu, &capture_tag);
+			params.capture_tag = capture_tag;
+		}
 		auto& stream = m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);
 		task_params  = stream.BufferDeviceAddress() + stream.Copy(&params, sizeof(params), 8);
 	}
@@ -1231,8 +1250,9 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	    state.ps_active && state.ps_input_info.stage.module != nullptr
 	        ? state.ps_input_info.stage.module->info.shader_hash
 	        : 0,
-	    // task: 1<<63 | indirect record count; mesh: groups<<32 | instances; else: count<<32 | instances
-	    mesh_task     ? ((uint64_t {1} << 63u) | emit.indirect.count)
+	    // task: 1<<63 | capture tag<<32 | indirect record count; mesh: groups<<32 | instances;
+	    // else: count<<32 | instances
+	    mesh_task     ? GpuBreadcrumbs::MeshCaptureInfo(capture_tag, emit.indirect.count)
 	    : mesh_active ? ((uint64_t {mesh_groups} << 32u) | draw.instance_count)
 	                  : ((uint64_t {draw.index_count} << 32u) | draw.instance_count));
 	if (mesh_task) {
