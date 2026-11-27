@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/renderer/waitProfile.h"
 
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <atomic>
 #include <cstdio>
@@ -640,6 +641,29 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		}
 
 		auto handler = g_cp_op_func[opcode];
+
+		if (handler == nullptr && packet_header == 0u) {
+			// A zero header where a packet should start: the guest has submitted (or chained
+			// to) command memory it has not written yet. Wait for it like a WAIT_REG_MEM
+			// instead of failing at once; give up after a few seconds.
+			thread_local const uint32_t* tl_zero_packet = nullptr;
+			thread_local std::chrono::steady_clock::time_point tl_zero_since;
+			const auto now = std::chrono::steady_clock::now();
+			if (tl_zero_packet != packet) {
+				tl_zero_packet = packet;
+				tl_zero_since  = now;
+				LOGF("CP: command memory at 0x%016" PRIx64 " (dword %" PRIu32 " of %" PRIu32
+				     ") is still zero; waiting for the guest to write it\n",
+				     reinterpret_cast<uint64_t>(packet), cursor.offset_dw, total_dw);
+			}
+			const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(now - tl_zero_since);
+			if (waited.count() < 5000) {
+				execution.m_suspended = true;
+				return;
+			}
+			LOGF("CP: command memory at 0x%016" PRIx64 " stayed zero for %lld ms\n",
+			     reinterpret_cast<uint64_t>(packet), static_cast<long long>(waited.count()));
+		}
 
 		if (handler == nullptr) {
 			const auto offset = cursor.offset_dw;
