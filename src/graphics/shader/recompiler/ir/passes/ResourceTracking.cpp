@@ -4067,10 +4067,25 @@ private:
 		}
 	}
 
+	// True when every S# dword is a plain scalar memory read (a sampler fetched from a table in
+	// memory), as opposed to lane-dependent or otherwise malformed arithmetic.
+	static bool SamplerWordsAreMemoryReads(const Inst& handle) {
+		if (handle.NumArgs() != 4u) return false;
+		for (uint32_t i = 0; i < 4u; i++) {
+			const auto* word = handle.Arg(i).Resolve().TryInstruction();
+			if (word == nullptr) return false;
+			const auto op = word->GetOpcode();
+			if (op != ValueOpcode::ReadConstBuffer && op != ValueOpcode::ReadConst &&
+			    op != ValueOpcode::LoadAddressU32) return false;
+		}
+		return true;
+	}
+
 	static bool SamplerFallbackEnabled() {
 		static const bool enabled = [] {
+			// Opt-in (set by the GTA VI launcher): the strict default keeps malformed S#s fatal.
 			const char* v = std::getenv("KYTY_SAMPLER_FALLBACK");
-			return v == nullptr || v[0] != '0';
+			return v != nullptr && v[0] == '1';
 		}();
 		return enabled;
 	}
@@ -4091,7 +4106,8 @@ private:
 			                [](Value word) { return word.Resolve().GetType() == Type::U32; })) {
 				return false;
 			}
-			if (expected == ValueOpcode::GetSamplerResource && SamplerFallbackEnabled()) {
+			if (expected == ValueOpcode::GetSamplerResource && SamplerFallbackEnabled() &&
+			    SamplerWordsAreMemoryReads(*handle)) {
 				// A sampler picked by a GPU-computed index into a sampler table (GTA VI's UI
 				// shaders) cannot be bound as a Vulkan sampler. Rather than abort the whole
 				// emulator, sample with a fixed bilinear clamp-to-edge S#; the texture itself is
