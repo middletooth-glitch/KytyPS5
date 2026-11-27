@@ -1760,6 +1760,18 @@ int KYTY_SYSV_ABI AgcBranchPatchSetThenTarget(uint32_t* cmd, uint8_t cache_polic
 	return OK;
 }
 
+// Changes the engine (ME or PFP) of an already-written ACQUIRE_MEM packet: bit 31 of its
+// second dword, as written by AgcDcbAcquireMem. GTA VI calls it for most of its acquires.
+int KYTY_SYSV_ABI AgcAcquireMemSetEngine(uint32_t* cmd, uint8_t engine) {
+	PRINT_NAME();
+	EXIT_NOT_IMPLEMENTED(cmd == nullptr);
+	if (((cmd[0] >> 8u) & 0xffu) != Pm4::IT_ACQUIRE_MEM) {
+		return AGC_ERROR_INVALID_PACKET;
+	}
+	cmd[1] = (cmd[1] & 0x7fffffffu) | (static_cast<uint32_t>(engine) << 31u);
+	return OK;
+}
+
 uint32_t* KYTY_SYSV_ABI AgcCbBranch(CommandBuffer* buf, uint8_t mode, uint8_t compare_function,
                                     const volatile uint64_t* compare_addr, uint64_t mask,
                                     uint64_t reference, uint8_t cache_policy1,

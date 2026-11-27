@@ -102,6 +102,7 @@ uint32_t* KYTY_SYSV_ABI AgcCbBranch(CommandBuffer* buf, uint8_t mode, uint8_t co
                                     uint8_t cache_policy2, const volatile uint32_t* buffer2,
                                     uint32_t size_in_dwords2);
 uint64_t KYTY_SYSV_ABI AgcCbBranchGetSize();
+int KYTY_SYSV_ABI AgcAcquireMemSetEngine(uint32_t* cmd, uint8_t engine);
 int KYTY_SYSV_ABI AgcBranchPatchSetThenTarget(uint32_t* cmd, uint8_t cache_policy,
                                                const volatile uint32_t* target,
                                                uint32_t size_in_dwords);
