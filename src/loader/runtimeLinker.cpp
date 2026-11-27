@@ -649,6 +649,7 @@ struct ThreadDumpEntry {
 	uint64_t rip;
 	uint64_t rsp;
 	uint64_t rbp;
+	uint64_t gpr[14]; // rax rbx rcx rdx rsi rdi r8..r15
 	uint32_t ret_count;
 	uint64_t rets[40];
 	uint64_t ret_slots[40];
@@ -703,6 +704,9 @@ static void DumpAllThreads() {
 				e.rip       = ctx.Rip;
 				e.rsp       = ctx.Rsp;
 				e.rbp       = ctx.Rbp;
+				const uint64_t gpr[14] = {ctx.Rax, ctx.Rbx, ctx.Rcx, ctx.Rdx, ctx.Rsi, ctx.Rdi, ctx.R8,
+				                          ctx.R9,  ctx.R10, ctx.R11, ctx.R12, ctx.R13, ctx.R14, ctx.R15};
+				std::memcpy(e.gpr, gpr, sizeof(gpr));
 				e.ret_count = 0;
 				// Copy from rsp up to the end of its committed region (a shallow thread sits just
 				// below the top of its stack), at most 64 KiB; ReadProcessMemory never faults.
@@ -750,6 +754,16 @@ static void DumpAllThreads() {
 		}
 		std::printf("tid=%lu rip=0x%016" PRIx64 " (%s+0x%" PRIx64 ") rsp=0x%016" PRIx64 " rbp=0x%016" PRIx64 "\n",
 		            e.tid, e.rip, base, off, e.rsp, e.rbp);
+		if (e.ret_count != 0) {
+			// Registers only matter for threads that are inside guest code paths.
+			static const char* names[14] = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8",
+			                                "r9",  "r10", "r11", "r12", "r13", "r14", "r15"};
+			std::printf("   ");
+			for (int r = 0; r < 14; r++) {
+				std::printf(" %s=%" PRIx64, names[r], e.gpr[r]);
+			}
+			std::printf("\n");
+		}
 		for (uint32_t i = 0; i < e.ret_count; i++) {
 			std::printf("    [rsp+0x%05" PRIx64 "] 0x%016" PRIx64 "\n", e.ret_slots[i] - e.rsp, e.rets[i]);
 		}

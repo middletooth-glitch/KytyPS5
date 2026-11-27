@@ -6,6 +6,9 @@
 #include <Zydis/Zydis.h>
 #include <atomic>
 #include <bit>
+#include <chrono>
+#include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <emmintrin.h>
 #include <xmmintrin.h>
@@ -754,6 +757,33 @@ static bool TryEmulateMonitorxMwaitx(Context& context) {
 	}
 
 	// Approximate AMD MONITORX/MWAITX as no-op/yield.
+	if (rip[2] == 0xfa) {
+		// Stall diagnostic: a guest spin-wait that keeps monitoring one address for seconds
+		// is waiting on something (usually a GPU-written fence) that never arrives.
+		thread_local uint64_t tl_addr     = 0;
+		thread_local uint64_t tl_since_ms = 0;
+		thread_local uint64_t tl_next_ms  = 0;
+		const auto            now_ms      = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count());
+		const auto address = static_cast<uint64_t>(context.Gpr(0));
+		if (address != tl_addr) {
+			tl_addr     = address;
+			tl_since_ms = now_ms;
+			tl_next_ms  = now_ms + 5000;
+		} else if (now_ms >= tl_next_ms) {
+			tl_next_ms        = now_ms + 30000;
+			const auto* value = reinterpret_cast<const uint64_t*>(address & ~uint64_t {7});
+			std::printf("monitorx stall: rip=0x%016" PRIx64 " addr=0x%016" PRIx64 " for %" PRIu64
+			            " ms; [addr]=0x%016" PRIx64 " [addr+8]=0x%016" PRIx64 " rdi=0x%016" PRIx64
+			            " rsi=0x%016" PRIx64 " r13=0x%016" PRIx64 " r14=0x%016" PRIx64 "\n",
+			            static_cast<uint64_t>(context.Rip()), address, now_ms - tl_since_ms, value[0], value[1],
+			            static_cast<uint64_t>(context.Gpr(7)), static_cast<uint64_t>(context.Gpr(6)),
+			            static_cast<uint64_t>(context.Gpr(13)), static_cast<uint64_t>(context.Gpr(14)));
+			std::fflush(stdout);
+		}
+	}
 	if (rip[2] == 0xfb) {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		SwitchToThread();
