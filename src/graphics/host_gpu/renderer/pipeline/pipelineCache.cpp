@@ -411,21 +411,6 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	options.back_code       = params.back_code;
 	options.dump_ir         = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
 	options.emit_debug_info = Config::GraphicsDebugDumpEnabled();
-	ShaderRecompiler::ShaderSource source;
-	if (entry == m_program_cache.end()) {
-		DumpShader(params.code, fmt::format("original/{}_{:016x}.bin",
-		                                    ShaderRecompiler::StageName(options.stage), params.hash));
-		source = ShaderRecompiler::PrepareShaderSource(params.code, options);
-		if (source.unsupported_call_pc != UINT32_MAX) {
-			PipelineCacheLog("!!! TEMPORARY COMPUTE DISPATCH SKIP !!! shader=0x{:016x} pc=0x{:08x} "
-			                 "reason=unsupported GPU-selected callable target; rendering is incomplete",
-			                 params.hash, source.unsupported_call_pc);
-			m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
-			return nullptr;
-		}
-	}
-	auto* current = entry == m_program_cache.end() ? &source : entry->second.call_source.get();
-	ShaderRecompiler::TranslateResult translated;
 	// KYTY_SKIP_UNSUPPORTED_SHADERS=1: a shader whose resources the tracker cannot resolve has
 	// its calls dropped (rendering is incomplete) instead of stopping the emulator.
 	static const bool skip_unsupported = [] {
@@ -447,6 +432,21 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	struct SoftFailScope {
 		~SoftFailScope() { ShaderRecompiler::IR::g_resource_tracking_soft_fail = nullptr; }
 	} soft_fail_scope;
+	ShaderRecompiler::ShaderSource source;
+	if (entry == m_program_cache.end()) {
+		DumpShader(params.code, fmt::format("original/{}_{:016x}.bin",
+		                                    ShaderRecompiler::StageName(options.stage), params.hash));
+		source = ShaderRecompiler::PrepareShaderSource(params.code, options);
+		if (source.unsupported_call_pc != UINT32_MAX) {
+			PipelineCacheLog("!!! TEMPORARY COMPUTE DISPATCH SKIP !!! shader=0x{:016x} pc=0x{:08x} "
+			                 "reason=unsupported GPU-selected callable target; rendering is incomplete",
+			                 params.hash, source.unsupported_call_pc);
+			m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
+			return nullptr;
+		}
+	}
+	auto* current = entry == m_program_cache.end() ? &source : entry->second.call_source.get();
+	ShaderRecompiler::TranslateResult translated;
 	if (current != nullptr) {
 		if (!current->calls.empty()) {
 			if (entry == m_program_cache.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);

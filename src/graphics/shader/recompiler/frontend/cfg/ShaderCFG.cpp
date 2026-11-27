@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
 
 #include "common/assert.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -40,6 +41,11 @@ void SetFailure(Graph& graph, FailureKind kind, uint32_t block_id, const std::st
 [[noreturn]] void ExitBuildFailure(Graph& graph, FailureKind kind, uint32_t block_id,
                                    const std::string& message) {
 	SetFailure(graph, kind, block_id, message);
+	if (auto* soft = IR::g_resource_tracking_soft_fail; soft != nullptr) {
+		IR::g_resource_tracking_soft_fail         = nullptr;
+		IR::g_resource_tracking_soft_fail_message = "shader CFG build failed: " + message;
+		std::longjmp(*soft, 1);
+	}
 	EXIT("shader CFG build failed: %s", message.c_str());
 	std::abort();
 }
