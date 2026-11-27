@@ -977,14 +977,18 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		image.cube      = DescriptorIsCube(descriptor);
 		const auto format =
 		    static_cast<Prospero::BufferFormat>((descriptor.dwords[1] >> 20u) & 0x1ffu);
+		// Image atomics work on the texel bits: 64-bit ones accept any 32_32 descriptor format,
+		// as 32-bit ones accept 32 UInt, SInt and Float (GTA VI: 64-bit atomics on 32_32 Float).
 		if (base.atomic &&
-		    (base.atomic64 ? format != Prospero::BufferFormat::k32_32UInt
+		    (base.atomic64 ? format != Prospero::BufferFormat::k32_32UInt &&
+		                         format != Prospero::BufferFormat::k32_32SInt &&
+		                         format != Prospero::BufferFormat::k32_32Float
 		                   : format != Prospero::BufferFormat::k32UInt &&
 		                         format != Prospero::BufferFormat::k32SInt &&
 		                         format != Prospero::BufferFormat::k32Float)) {
 			return SpecializationFail(
-			    fmt::format("atomic image descriptor {} uses unsupported format {}", i,
-			                static_cast<uint32_t>(format)));
+			    fmt::format("atomic{} image descriptor {} uses unsupported format {}",
+			                base.atomic64 ? "64" : "32", i, static_cast<uint32_t>(format)));
 		}
 		const bool storage      = base.resource_class == ImageResourceClass::Storage;
 		image.fmask             = Prospero::IsFmaskTextureFormat(format);
