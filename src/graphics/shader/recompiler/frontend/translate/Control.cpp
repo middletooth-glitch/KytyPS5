@@ -1,6 +1,8 @@
 #include "common/assert.h"
 #include "graphics/shader/recompiler/frontend/translate/Translator.h"
 
+#include <cstdlib>
+
 namespace Libs::Graphics::ShaderRecompiler::Frontend {
 namespace {
 
@@ -318,7 +320,22 @@ void Translator::S_WQM(const Decoder::Instruction& inst, bool wide) {
 	} else {
 		source = ir.ConstructU64(ReadU32(inst.src0), IR::U32(IR::Value(0u)));
 	}
-	const auto result = IR::U64(ir.Emit(IR::ValueOpcode::WqmU64, {source}));
+	auto result = IR::U64(ir.Emit(IR::ValueOpcode::WqmU64, {source}));
+	// KYTY_WQM_ACTIVE=1 (GTA VI): keep only lanes the subgroup can ballot in a pixel shader's
+	// whole-quad EXEC words. Helper lanes that WQM adds but that never appear in a ballot cannot
+	// be cleared from a mask by any later V_CMP (whose words are ballots), so a waterfall loop that
+	// picks one with S_FF1 never ends and the GPU hangs until the driver resets.
+	static const bool wqm_active = [] {
+		const char* value = std::getenv("KYTY_WQM_ACTIVE");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (wqm_active && wide && program.stage == ShaderType::Pixel &&
+	    inst.dst.kind == Decoder::OperandKind::ExecLo) {
+		const auto active = BallotMask(IR::U1(IR::Value(true)));
+		const auto lo     = ir.BitwiseAnd(IR::U32(ir.CompositeExtract(result, 0)), active[0]);
+		const auto hi     = ir.BitwiseAnd(IR::U32(ir.CompositeExtract(result, 1)), active[1]);
+		result            = ir.ConstructU64(lo, hi);
+	}
 	if (!wide) {
 		const auto low = ir.CompositeExtract(result, 0);
 		const bool destination_is_mask = IsExecOrVcc(inst.dst);
