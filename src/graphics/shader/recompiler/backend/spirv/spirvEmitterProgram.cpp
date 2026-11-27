@@ -99,11 +99,45 @@ void EmitReturn(ValueEmitContext& ctx) {
 // together). Past the cap every guarded loop exits at its next test, so an emulation bug that
 // leaves a guest spin-wait or waterfall loop without progress renders wrongly instead of hanging
 // the GPU until the driver resets. 0 or unset: no guard.
-uint32_t LoopGuardLimit() {
+// KYTY_LOOP_GUARD_HASHES="<hash>=<N>[,<hash>=<N>...]" (hex guest hashes) gives single shaders
+// their own cap, so one suspect shader can get a tight budget without starving every other loop.
+struct LoopGuardOverride {
+	uint64_t hash  = 0;
+	uint32_t limit = 0;
+};
+
+static std::vector<LoopGuardOverride> ParseLoopGuardOverrides() {
+	std::vector<LoopGuardOverride> list;
+	const char*                    cursor = std::getenv("KYTY_LOOP_GUARD_HASHES");
+	while (cursor != nullptr && *cursor != '\0') {
+		char*      end  = nullptr;
+		const auto hash = std::strtoull(cursor, &end, 16);
+		if (end == cursor) {
+			cursor++;
+			continue;
+		}
+		cursor = end;
+		if (*cursor != '=') continue;
+		cursor++;
+		const auto limit = std::strtoul(cursor, &end, 0);
+		if (end == cursor) continue;
+		cursor = end;
+		if (hash != 0) {
+			list.push_back({hash, static_cast<uint32_t>(limit)});
+		}
+	}
+	return list;
+}
+
+uint32_t LoopGuardLimit(const EmitterState& state) {
 	static const uint32_t limit = [] {
 		const char* value = std::getenv("KYTY_LOOP_GUARD");
 		return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 0)) : 0u;
 	}();
+	static const auto overrides = ParseLoopGuardOverrides();
+	for (const auto& entry: overrides) {
+		if (entry.hash == state.program.shader_hash) return entry.limit;
+	}
 	return limit;
 }
 
@@ -123,14 +157,14 @@ uint32_t EmitLoopGuardTripped(EmitterState& state) {
 	builder.AddFunction(spv::OpStore, state.loop_guard_variable, next);
 	const auto tripped = builder.AllocateId();
 	builder.AddFunction(spv::OpUGreaterThan, TypeBool(state), tripped, next,
-	                    ConstantU32(state, LoopGuardLimit()));
+	                    ConstantU32(state, LoopGuardLimit(state)));
 	return tripped;
 }
 
 // A loop's back edge (latch to header) or its header's exit test, guarded so that a tripped
 // budget takes the existing exit edge.
 uint32_t GuardLoopCondition(ValueEmitContext& ctx, const IR::Block* block, uint32_t condition) {
-	if (LoopGuardLimit() == 0) return condition;
+	if (LoopGuardLimit(ctx.state) == 0) return condition;
 	const auto& term = block->terminator;
 	const auto  is_back_edge = [&](const IR::Block* target) {
 		return target != nullptr && target->terminator.loop_header &&
