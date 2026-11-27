@@ -33,6 +33,7 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -600,6 +601,19 @@ struct DrawIndexBufferSource {
 };
 
 // The task shader's inputs for an indirect mesh draw: Params in gpu_mesh_indirect.task.
+// KYTY_MESH_TASK_MAX_GROUPS=N: an indirect mesh record asking for more than N mesh workgroups in
+// total draws nothing (as one past the host limits already does). GTA VI's GPU hangs land in
+// indirect mesh draws; an implausible record (stale or unwritten by a culling pass) launching
+// millions of groups would run past the Windows GPU timeout.
+static uint32_t MeshTaskTotalCap() {
+	static const uint32_t cap = [] {
+		const char* value = std::getenv("KYTY_MESH_TASK_MAX_GROUPS");
+		const auto  n     = value != nullptr ? std::strtoul(value, nullptr, 0) : 0ul;
+		return n != 0 ? static_cast<uint32_t>(n) : UINT32_MAX;
+	}();
+	return cap;
+}
+
 struct MeshTaskParams {
 	vk::DeviceAddress records        = 0;
 	vk::DeviceAddress index_address  = 0;
@@ -1141,7 +1155,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		    .group_step     = mesh.primitives_per_group * mesh.InputPrimitiveStep(),
 		    .max_groups     = limits.maxMeshWorkGroupCount[0],
 		    .max_instances  = limits.maxMeshWorkGroupCount[1],
-		    .max_total      = limits.maxMeshWorkGroupTotalCount,
+		    .max_total      = std::min(limits.maxMeshWorkGroupTotalCount, MeshTaskTotalCap()),
 		};
 		auto& stream = m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);
 		task_params  = stream.BufferDeviceAddress() + stream.Copy(&params, sizeof(params), 8);
