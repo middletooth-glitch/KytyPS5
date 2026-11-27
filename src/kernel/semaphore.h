@@ -26,6 +26,9 @@ int KYTY_SYSV_ABI PthreadSemTimedwait(void* sem, KernelUseconds usec);
 int KYTY_SYSV_ABI PthreadSemPost(void* sem);
 int KYTY_SYSV_ABI PthreadSemGetvalue(void* sem, int* value);
 
+// Diagnostics: print every kernel semaphore that currently has a blocked waiter.
+void DumpBlockedSemaphores();
+
 } // namespace Libs::LibKernel::Semaphore
 
 namespace Libs::Posix {

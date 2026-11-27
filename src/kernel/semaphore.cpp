@@ -10,6 +10,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cinttypes>
+#include <cstdio>
+#include <mutex>
+#include <unordered_set>
 #include <limits>
 #include <unordered_map>
 #include <vector>
@@ -20,13 +25,32 @@ LIB_NAME("libkernel", "libkernel");
 
 constexpr uint32_t SIGNAL_APC_POLL_MICROS = 10000;
 
+class KernelSemaPrivate;
+
+// Live semaphores, for the fatal-fault diagnostic dump only.
+static std::mutex                             g_sema_registry_mutex;
+static std::unordered_set<KernelSemaPrivate*> g_sema_registry;
+
+static uint64_t SemaNowMs() {
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+	                                 std::chrono::steady_clock::now().time_since_epoch())
+	                                 .count());
+}
+
+static uint64_t SemaHostTid() {
+	return Libs::LibKernel::PthreadGetHostThreadId(Libs::LibKernel::PthreadSelfOrNull());
+}
+
 class KernelSemaPrivate {
 public:
 	enum class Result { Ok, TimedOut, Canceled, Deleted, InvalCount };
 
 	KernelSemaPrivate(const std::string& name, bool fifo, int init_count, int max_count)
 	    : m_name(name), m_fifo_order(fifo), m_count(init_count), m_init_count(init_count),
-	      m_max_count(max_count) {};
+	      m_max_count(max_count) {
+		std::lock_guard registry(g_sema_registry_mutex);
+		g_sema_registry.insert(this);
+	};
 	virtual ~KernelSemaPrivate();
 
 	KYTY_CLASS_NO_COPY(KernelSemaPrivate);
@@ -42,6 +66,8 @@ public:
 
 	[[nodiscard]] const std::string& GetName() const { return m_name; }
 
+	void DumpIfBlocked();
+
 private:
 	enum class Status { Set, Deleted };
 
@@ -50,6 +76,8 @@ private:
 	struct WaitingThread {
 		int             priority   = 700;
 		int             need_count = 0;
+		uint64_t        host_tid   = 0;
+		uint64_t        since_ms   = 0;
 		Result          result     = Result::TimedOut;
 		bool            ready      = false;
 		Common::CondVar cond_var;
@@ -67,9 +95,42 @@ private:
 	int                         m_count;
 	int                         m_init_count;
 	int                         m_max_count;
+	uint64_t                    m_signals          = 0;
+	int                         m_failed_signals   = 0;
+	uint64_t                    m_last_signal_tid  = 0;
+	uint64_t                    m_last_signal_ms   = 0;
 };
 
+void KernelSemaPrivate::DumpIfBlocked() {
+	Common::LockGuard lock(m_mutex);
+	bool              blocked = false;
+	for (const auto* waiter: m_waiting_threads) blocked |= !waiter->ready;
+	if (!blocked) return;
+	const auto now = SemaNowMs();
+	std::printf("sema %p \"%s\" count=%d max=%d signals=%" PRIu64 " failed_signals=%d last_signal_tid=%" PRIu64
+	            " last_signal_ago_ms=%" PRIu64 "\n",
+	            static_cast<void*>(this), m_name.c_str(), m_count, m_max_count, m_signals, m_failed_signals,
+	            m_last_signal_tid, m_last_signal_ms != 0 ? now - m_last_signal_ms : 0);
+	for (const auto* waiter: m_waiting_threads) {
+		if (!waiter->ready) {
+			std::printf("    waiter tid=%" PRIu64 " need=%d waiting_ms=%" PRIu64 "\n", waiter->host_tid,
+			            waiter->need_count, now - waiter->since_ms);
+		}
+	}
+}
+
+void DumpBlockedSemaphores() {
+	std::lock_guard registry(g_sema_registry_mutex);
+	std::printf("--- Blocked kernel semaphores ---\n");
+	for (auto* sema: g_sema_registry) sema->DumpIfBlocked();
+	std::fflush(stdout);
+}
+
 KernelSemaPrivate::~KernelSemaPrivate() {
+	{
+		std::lock_guard registry(g_sema_registry_mutex);
+		g_sema_registry.erase(this);
+	}
 	Common::LockGuard lock(m_mutex);
 
 	while (m_status != Status::Set) {
@@ -133,10 +194,14 @@ KernelSemaPrivate::Result KernelSemaPrivate::Signal(int signal_count) {
 	}
 
 	if (m_count + signal_count > m_max_count) {
+		m_failed_signals++;
 		return Result::InvalCount;
 	}
 
 	m_count += signal_count;
+	m_signals++;
+	m_last_signal_tid = SemaHostTid();
+	m_last_signal_ms  = SemaNowMs();
 
 	WakeWaiters();
 
@@ -210,6 +275,8 @@ KernelSemaPrivate::Result KernelSemaPrivate::Wait(int need_count, uint32_t* ptr_
 	WaitingThread waiter {};
 	waiter.priority   = (m_fifo_order ? 0 : Libs::LibKernel::PthreadGetCurrentPriorityForKernel());
 	waiter.need_count = need_count;
+	waiter.host_tid   = SemaHostTid();
+	waiter.since_ms   = SemaNowMs();
 	AddWaiter(&waiter);
 
 	while (!waiter.ready) {

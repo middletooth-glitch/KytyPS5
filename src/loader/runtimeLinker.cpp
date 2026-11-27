@@ -19,6 +19,7 @@
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
+#include "kernel/semaphore.h"
 #include "loader/elf.h"
 #include "loader/gamePatch.h"
 #include "loader/guestInstructionPatcher.h"
@@ -649,8 +650,8 @@ struct ThreadDumpEntry {
 	uint64_t rsp;
 	uint64_t rbp;
 	uint32_t ret_count;
-	uint64_t rets[24];
-	uint64_t ret_slots[24];
+	uint64_t rets[40];
+	uint64_t ret_slots[40];
 };
 
 static bool LooksLikeGuestReturn(uint64_t r) {
@@ -703,16 +704,22 @@ static void DumpAllThreads() {
 				e.rsp       = ctx.Rsp;
 				e.rbp       = ctx.Rbp;
 				e.ret_count = 0;
-				SIZE_T got  = 0;
-				uint64_t want = sizeof(stack_copy);
-				// Copy as much of the stack as can be read; ReadProcessMemory never faults.
-				while (want >= 4096 &&
-				       ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(ctx.Rsp), stack_copy,
-				                         static_cast<SIZE_T>(want), &got) == FALSE) {
-					want /= 2;
+				// Copy from rsp up to the end of its committed region (a shallow thread sits just
+				// below the top of its stack), at most 64 KiB; ReadProcessMemory never faults.
+				SIZE_T                   got  = 0;
+				uint64_t                 want = sizeof(stack_copy);
+				MEMORY_BASIC_INFORMATION mbi {};
+				if (VirtualQuery(reinterpret_cast<const void*>(ctx.Rsp), &mbi, sizeof(mbi)) != 0) {
+					const uint64_t end = reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize;
+					want               = std::min<uint64_t>(want, end > ctx.Rsp ? end - ctx.Rsp : 0);
+				}
+				want &= ~uint64_t {7};
+				if (want != 0 &&
+				    ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(ctx.Rsp), stack_copy,
+				                      static_cast<SIZE_T>(want), &got) == FALSE) {
 					got = 0;
 				}
-				for (SIZE_T i = 0; i < got / 8 && e.ret_count < 24; i++) {
+				for (SIZE_T i = 0; i < got / 8 && e.ret_count < 40; i++) {
 					if (LooksLikeGuestReturn(stack_copy[i])) {
 						e.ret_slots[e.ret_count] = ctx.Rsp + i * 8;
 						e.rets[e.ret_count++]    = stack_copy[i];
@@ -893,6 +900,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 	}
 	if (const char* v = std::getenv("KYTY_DUMP_THREADS"); v == nullptr || v[0] != '0') {
 		DumpAllThreads();
+		Libs::LibKernel::Semaphore::DumpBlockedSemaphores();
 	}
 #endif
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64
