@@ -6,7 +6,9 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
+#include <cinttypes>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -4065,6 +4067,14 @@ private:
 		}
 	}
 
+	static bool SamplerFallbackEnabled() {
+		static const bool enabled = [] {
+			const char* v = std::getenv("KYTY_SAMPLER_FALLBACK");
+			return v == nullptr || v[0] != '0';
+		}();
+		return enabled;
+	}
+
 	bool GetHandle(Value value, ValueOpcode expected, uint32_t width, uint32_t pc,
 	               uint32_t base_reg, Inst*& handle, uint32_t& source, bool sampler = false,
 	               bool sample_adjust = false) {
@@ -4080,6 +4090,24 @@ private:
 			    std::all_of(descriptor.dwords.begin(), descriptor.dwords.begin() + width,
 			                [](Value word) { return word.Resolve().GetType() == Type::U32; })) {
 				return false;
+			}
+			if (expected == ValueOpcode::GetSamplerResource && SamplerFallbackEnabled()) {
+				// A sampler picked by a GPU-computed index into a sampler table (GTA VI's UI
+				// shaders) cannot be bound as a Vulkan sampler. Rather than abort the whole
+				// emulator, sample with a fixed bilinear clamp-to-edge S#; the texture itself is
+				// still resolved normally, only the filter/addressing state is approximated.
+				static constexpr std::array<uint32_t, 4> FallbackSampler = {0x00000092u, 0x00fff000u,
+				                                                              0x05500000u, 0x00000000u};
+				descriptor.dword_count = 4;
+				for (uint32_t i = 0; i < 4u; i++) descriptor.dwords[i] = Value(FallbackSampler[i]);
+				for (auto& entry: m_resolved_handles) {
+					if (entry.handle == handle && entry.pc == pc) entry.source = descriptor;
+				}
+				std::printf("Shader 0x%016" PRIx64 " pc=0x%08x: sampler from a runtime table index "
+				            "(dword %u); using a fallback bilinear clamp sampler\n",
+				            m_program.shader_hash, pc, bad_dword);
+				source = InternSource(descriptor);
+				return true;
 			}
 			Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
 			                     ValueOpcodeName(expected), bad_dword));
