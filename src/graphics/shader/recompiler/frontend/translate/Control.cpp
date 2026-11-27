@@ -337,7 +337,12 @@ void Translator::S_WQM(const Decoder::Instruction& inst, bool wide) {
 		result            = ir.ConstructU64(lo, hi);
 	}
 	if (!wide) {
-		const auto low = ir.CompositeExtract(result, 0);
+		auto low = IR::U32(ir.CompositeExtract(result, 0));
+		// Same as above for wave32 pixel shaders, whose EXEC is one word (S_WQM_B32 exec_lo).
+		if (wqm_active && program.stage == ShaderType::Pixel && program.wave_size == 32u &&
+		    inst.dst.kind == Decoder::OperandKind::ExecLo) {
+			low = ir.BitwiseAnd(low, BallotMask(IR::U1(IR::Value(true)))[0]);
+		}
 		const bool destination_is_mask = IsExecOrVcc(inst.dst);
 		const bool destination_is_exec = inst.dst.kind == Decoder::OperandKind::ExecLo ||
 		                                 inst.dst.kind == Decoder::OperandKind::ExecHi;
