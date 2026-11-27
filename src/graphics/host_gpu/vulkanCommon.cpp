@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "graphics/guest_gpu/gpu_defs.h"
+#include "graphics/host_gpu/gpuBreadcrumbs.h"
 
 #include <array>
 #include <atomic>
@@ -132,6 +133,7 @@ void ReportDeviceFault(const char* where) {
 	static std::atomic<bool> reported {false};
 	if (reported.exchange(true)) return;
 	std::printf("--- Vulkan device lost (%s) ---\n", where);
+	GpuBreadcrumbs::Report();
 	const auto get_fault = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT;
 	if (!g_fault_device_enabled || g_fault_device == nullptr || get_fault == nullptr) {
 		std::printf("VK_EXT_device_fault is not available on this driver\n");

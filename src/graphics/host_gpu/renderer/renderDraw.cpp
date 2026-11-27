@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/renderDraw.h"
+#include "graphics/host_gpu/gpuBreadcrumbs.h"
 
 #include "common/assert.h"
 #include "common/common.h"
@@ -1208,6 +1209,14 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
 	auto&         occlusion_queries = m_context.GetOcclusionQueries();
 	const int32_t occlusion_query   = occlusion_queries.Begin(vk_buffer);
+	const uint32_t crumb = GpuBreadcrumbs::Begin(
+	    vk_buffer, mesh_active ? "draw-mesh" : "draw",
+	    vertex_stages.empty() || vertex_stages.front().stage.module == nullptr
+	        ? 0
+	        : vertex_stages.front().stage.module->info.shader_hash,
+	    state.ps_active && state.ps_input_info.stage.module != nullptr
+	        ? state.ps_input_info.stage.module->info.shader_hash
+	        : 0);
 	if (mesh_task) {
 		vk_buffer.drawMeshTasksEXT(emit.indirect.count, 1, 1);
 	} else if (mesh_active) {
@@ -1221,6 +1230,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		vk_buffer.drawIndirect(args_buffer.first->Handle(), args_buffer.second,
 		                       emit.indirect.count, emit.indirect.stride);
 	}
+	GpuBreadcrumbs::End(vk_buffer, crumb);
 	occlusion_queries.End(vk_buffer, occlusion_query);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);

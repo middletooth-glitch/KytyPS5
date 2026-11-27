@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/upscaler/dlss.h"
 #include "graphics/host_gpu/renderer/upscaler/fsr.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/host_gpu/gpuBreadcrumbs.h"
 #include "graphics/presentation/openxrHeadset.h"
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
@@ -420,6 +421,7 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 		               add(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
 	}
 	LOGF("Vulkan device fault reporting: %s\n", device_fault ? "true" : "false");
+	const bool buffer_marker = GpuBreadcrumbs::Requested() && add(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
 	add(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
 	const bool extended_dynamic_state = add(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
 	if (!add(VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME)) {
@@ -776,6 +778,9 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	RequireVulkanSuccess(physical_device.createDevice(&create.get(), nullptr, &device),
 	                     "vkCreateDevice");
 	SetDeviceFaultReporting(device, device_fault);
+	if (buffer_marker) {
+		GpuBreadcrumbs::Init(physical_device, device);
+	}
 	return device;
 }
 
