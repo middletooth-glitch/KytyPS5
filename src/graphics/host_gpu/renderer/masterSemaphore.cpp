@@ -3,6 +3,10 @@
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/vulkanCommon.h"
+
+#include <cinttypes>
+#include <cstdio>
 #include "graphics/host_gpu/renderer/waitProfile.h"
 
 namespace Libs::Graphics {
@@ -26,6 +30,11 @@ MasterSemaphore::~MasterSemaphore() {
 void MasterSemaphore::Refresh() {
 	uint64_t   counter = 0;
 	const auto result  = m_graphics.device.getSemaphoreCounterValue(m_semaphore, &counter);
+	if (result == vk::Result::eErrorDeviceLost) {
+		std::printf("GPU timeline at device loss: completed tick=%" PRIu64 "\n",
+		            m_gpu_tick.load(std::memory_order_acquire));
+		ReportDeviceFault("timeline query");
+	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 
 	auto known = m_gpu_tick.load(std::memory_order_acquire);
@@ -53,6 +62,11 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	                                         Common::DebugCounters::Counter::GpuWaitNs);
 	const auto start  = std::chrono::steady_clock::now();
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
+	if (result == vk::Result::eErrorDeviceLost) {
+		std::printf("GPU timeline at device loss: completed tick=%" PRIu64 " waited tick=%" PRIu64 "\n",
+		            m_gpu_tick.load(std::memory_order_acquire), tick);
+		ReportDeviceFault("timeline wait");
+	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	WaitProfile::Record(static_cast<uint64_t>(
 	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)

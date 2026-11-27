@@ -425,6 +425,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		     stages[0] != nullptr ? stages[0]->info.shader_hash : 0,
 		     stages[3] != nullptr ? stages[3]->info.shader_hash : 0);
 		pipeline.pipeline = nullptr;
+		if (result == vk::Result::eErrorDeviceLost) ReportDeviceFault("pipeline creation");
 		EXIT_NOT_IMPLEMENTED(fatal);
 		return;
 	}
@@ -486,6 +487,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		LOGF("Compute pipeline creation failed: %s (cs=0x%016" PRIx64 " wave=%u)\n",
 		     vk::to_string(result).c_str(), module.info.shader_hash, wave_size);
 		pipeline.pipeline = nullptr;
+		if (result == vk::Result::eErrorDeviceLost) ReportDeviceFault("pipeline creation");
 		EXIT_NOT_IMPLEMENTED(fatal);
 		return;
 	}

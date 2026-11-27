@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/host_gpu/renderer/trace3d.h"
 #include "graphics/host_gpu/renderer/waitProfile.h"
 
@@ -351,6 +352,9 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::QueueSubmits);
 
+	if (result == vk::Result::eErrorDeviceLost) {
+		ReportDeviceFault("vkQueueSubmit");
+	}
 	if (result != vk::Result::eSuccess) {
 		EXIT("vkQueueSubmit failed: %s, tick=%" PRIu64 "\n", vk::to_string(result).c_str(), tick);
 	}

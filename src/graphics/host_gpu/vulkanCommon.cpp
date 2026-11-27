@@ -4,6 +4,10 @@
 #include "graphics/guest_gpu/gpu_defs.h"
 
 #include <array>
+#include <atomic>
+#include <cinttypes>
+#include <cstdio>
+#include <vector>
 
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
@@ -116,7 +120,63 @@ vk::Format VulkanFormat(Prospero::BufferFormat guest_format) {
 	return index < kFormatLookup.size() ? kFormatLookup[index] : vk::Format::eUndefined;
 }
 
+static vk::Device g_fault_device         = nullptr;
+static bool       g_fault_device_enabled = false;
+
+void SetDeviceFaultReporting(vk::Device device, bool enabled) {
+	g_fault_device         = device;
+	g_fault_device_enabled = enabled;
+}
+
+void ReportDeviceFault(const char* where) {
+	static std::atomic<bool> reported {false};
+	if (reported.exchange(true)) return;
+	std::printf("--- Vulkan device lost (%s) ---\n", where);
+	const auto get_fault = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT;
+	if (!g_fault_device_enabled || g_fault_device == nullptr || get_fault == nullptr) {
+		std::printf("VK_EXT_device_fault is not available on this driver\n");
+		std::fflush(stdout);
+		return;
+	}
+	VkDevice               device = g_fault_device;
+	VkDeviceFaultCountsEXT counts {};
+	counts.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT;
+	if (get_fault(device, &counts, nullptr) < 0) {
+		std::printf("vkGetDeviceFaultInfoEXT (counts) failed\n");
+		std::fflush(stdout);
+		return;
+	}
+	std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+	std::vector<VkDeviceFaultVendorInfoEXT>  vendors(counts.vendorInfoCount);
+	counts.vendorBinarySize = 0;
+	VkDeviceFaultInfoEXT info {};
+	info.sType             = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT;
+	info.pAddressInfos     = addresses.empty() ? nullptr : addresses.data();
+	info.pVendorInfos      = vendors.empty() ? nullptr : vendors.data();
+	info.pVendorBinaryData = nullptr;
+	const auto result      = get_fault(device, &counts, &info);
+	std::printf("fault result=%d description=\"%s\" addresses=%u vendor_infos=%u\n", static_cast<int>(result),
+	            info.description, counts.addressInfoCount, counts.vendorInfoCount);
+	for (const auto& a: addresses) {
+		static const char* types[] = {"none", "read-invalid", "write-invalid", "execute-invalid",
+		                              "instruction-pointer-unknown", "instruction-pointer-invalid",
+		                              "instruction-pointer-fault"};
+		const auto type = static_cast<uint32_t>(a.addressType);
+		std::printf("  address type=%s reported=0x%016" PRIx64 " precision=0x%" PRIx64 "\n",
+		            type < 7u ? types[type] : "?", static_cast<uint64_t>(a.reportedAddress),
+		            static_cast<uint64_t>(a.addressPrecision));
+	}
+	for (const auto& v: vendors) {
+		std::printf("  vendor \"%s\" code=0x%" PRIx64 " data=0x%" PRIx64 "\n", v.description,
+		            static_cast<uint64_t>(v.vendorFaultCode), static_cast<uint64_t>(v.vendorFaultData));
+	}
+	std::fflush(stdout);
+}
+
 void RequireVulkanSuccess(vk::Result result, const char* operation) {
+	if (result == vk::Result::eErrorDeviceLost) {
+		ReportDeviceFault(operation);
+	}
 	if (result != vk::Result::eSuccess) {
 		EXIT("%s failed: %s (%d)\n", operation, vk::to_string(result).c_str(),
 		     static_cast<int>(result));

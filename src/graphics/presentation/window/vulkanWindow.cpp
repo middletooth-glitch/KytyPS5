@@ -411,6 +411,15 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	       image_atomic_int64, conditional_rendering, barycentric, compute_derivatives,
 	       acceleration_structure, ray_query, cooperative_matrix, float8] = supported;
 	graphics.memory_budget_ext_enabled = add(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+	// Device-lost diagnostics; the feature is queried and enabled separately below.
+	bool device_fault = false;
+	if (HasExtension(available_extensions, VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
+		vk::StructureChain<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceFaultFeaturesEXT> fault_query;
+		physical_device.getFeatures2(&fault_query.get<vk::PhysicalDeviceFeatures2>());
+		device_fault = fault_query.get<vk::PhysicalDeviceFaultFeaturesEXT>().deviceFault == VK_TRUE &&
+		               add(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+	}
+	LOGF("Vulkan device fault reporting: %s\n", device_fault ? "true" : "false");
 	add(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
 	const bool extended_dynamic_state = add(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
 	if (!add(VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME)) {
@@ -756,9 +765,17 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 		create.unlink<vk::PhysicalDeviceRayQueryFeaturesKHR>();
 	}
 
+	vk::PhysicalDeviceFaultFeaturesEXT fault_features {.deviceFault = VK_TRUE};
+	if (device_fault) {
+		auto& head           = create.get<vk::DeviceCreateInfo>();
+		fault_features.pNext = const_cast<void*>(head.pNext);
+		head.pNext           = &fault_features;
+	}
+
 	vk::Device device = nullptr;
 	RequireVulkanSuccess(physical_device.createDevice(&create.get(), nullptr, &device),
 	                     "vkCreateDevice");
+	SetDeviceFaultReporting(device, device_fault);
 	return device;
 }
 

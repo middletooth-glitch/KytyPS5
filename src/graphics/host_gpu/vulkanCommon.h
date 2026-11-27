@@ -26,6 +26,9 @@ namespace Libs::Graphics {
 
 vk::Format  VulkanFormat(Prospero::BufferFormat guest_format);
 void        RequireVulkanSuccess(vk::Result result, const char* operation);
+// Device-lost diagnostics: VK_EXT_device_fault when the driver offers it.
+void        SetDeviceFaultReporting(vk::Device device, bool enabled);
+void        ReportDeviceFault(const char* where);
 vk::ShaderModule CompileSPV(std::span<const uint32_t> code, vk::Device device);
 vk::Pipeline     CreateComputePipeline(vk::Device device, std::span<const uint32_t> code,
                                        vk::PipelineLayout layout, const char* operation);
