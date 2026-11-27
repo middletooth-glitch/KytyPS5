@@ -1,5 +1,6 @@
 #include "common/assert.h"
 
+#include <cstdio>
 #include <atomic>
 #include <cinttypes>
 #include "graphics/host_gpu/renderer/trace3d.h"
@@ -27,6 +28,31 @@
 #include <vector>
 
 namespace Libs::Graphics {
+
+// Which pipeline this thread is handing to the driver: printed when the driver crashes inside the
+// call, so the shader that trips it can be identified (and skipped or worked around).
+namespace {
+thread_local const char* t_compile_kind = nullptr;
+thread_local uint64_t    t_compile_a    = 0;
+thread_local uint64_t    t_compile_b    = 0;
+struct PipelineCompileScope {
+	PipelineCompileScope(const char* kind, uint64_t a, uint64_t b) {
+		t_compile_kind = kind;
+		t_compile_a    = a;
+		t_compile_b    = b;
+	}
+	~PipelineCompileScope() { t_compile_kind = nullptr; }
+};
+} // namespace
+
+void PrintCurrentPipelineCompile() {
+	if (t_compile_kind != nullptr) {
+		std::printf("--- Driver was compiling a %s pipeline on this thread: 0x%016" PRIx64
+		            " 0x%016" PRIx64 " ---\n",
+		            t_compile_kind, t_compile_a, t_compile_b);
+		std::fflush(stdout);
+	}
+}
 
 static vk::BlendFactor GetBlendFactor(uint32_t factor) {
 	switch (static_cast<Prospero::BlendFactor>(factor)) {
@@ -417,6 +443,9 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	pipeline_info.layout              = pipeline.pipeline_layout;
 
 	TRACE3D("graphics pipeline begin\n");
+	const PipelineCompileScope compile_scope("graphics",
+	                                         stages[0] != nullptr ? stages[0]->info.shader_hash : 0,
+	                                         stages[3] != nullptr ? stages[3]->info.shader_hash : 0);
 	const auto result = graphics.device.createGraphicsPipelines(driver_cache, 1, &pipeline_info,
 	                                                            nullptr, &pipeline.pipeline);
 	if (result != vk::Result::eSuccess) {
@@ -481,6 +510,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	if (uses_3d) {
 		TRACE3D("compute pipeline hash=0x%016" PRIx64 " begin\n", module.info.shader_hash);
 	}
+	const PipelineCompileScope compile_scope("compute", module.info.shader_hash, wave_size);
 	const auto result =
 	    graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr, &pipeline.pipeline);
 	if (result != vk::Result::eSuccess) {
