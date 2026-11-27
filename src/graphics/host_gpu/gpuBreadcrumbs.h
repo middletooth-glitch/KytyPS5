@@ -5,8 +5,9 @@
 // every guest draw and dispatch. When the device is lost, the markers show which shaders were
 // still executing, so a GPU hang (TDR) can be traced to the guest work that caused it.
 
+#include "graphics/host_gpu/vulkanCommon.h"
+
 #include <cstdint>
-#include <vulkan/vulkan.hpp>
 
 namespace Libs::Graphics::GpuBreadcrumbs {
 

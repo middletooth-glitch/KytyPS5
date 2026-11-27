@@ -67,7 +67,7 @@ void Init(vk::PhysicalDevice physical_device, vk::Device device) {
 	allocate.allocationSize  = requirements.size;
 	allocate.memoryTypeIndex = type;
 	if (device.allocateMemory(&allocate, nullptr, &g_memory) != vk::Result::eSuccess) return;
-	if (device.bindBufferMemory(g_buffer, g_memory, 0) != vk::Result::eSuccess) return;
+	static_cast<void>(device.bindBufferMemory(g_buffer, g_memory, 0));
 	void* mapped = nullptr;
 	if (device.mapMemory(g_memory, 0, 64, {}, &mapped) != vk::Result::eSuccess) return;
 	g_markers = static_cast<volatile uint32_t*>(mapped);
