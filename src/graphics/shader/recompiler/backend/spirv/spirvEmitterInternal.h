@@ -169,6 +169,8 @@ struct EmitterState {
 	std::vector<InputBinding>  inputs;
 	std::vector<OutputBinding> outputs;
 	std::vector<uint32_t>      interface_variables;
+	// KYTY_LOOP_GUARD: per-invocation count of loop iterations (Private u32), 0 until used.
+	uint32_t loop_guard_variable = 0;
 };
 
 uint32_t TypeVoid(EmitterState& state);

@@ -95,6 +95,73 @@ void EmitReturn(ValueEmitContext& ctx) {
 	ctx.state.builder.AddFunction(spv::OpReturn);
 }
 
+// Diagnostic: KYTY_LOOP_GUARD=N caps the loop iterations one invocation may run (all loops
+// together). Past the cap every guarded loop exits at its next test, so an emulation bug that
+// leaves a guest spin-wait or waterfall loop without progress renders wrongly instead of hanging
+// the GPU until the driver resets. 0 or unset: no guard.
+uint32_t LoopGuardLimit() {
+	static const uint32_t limit = [] {
+		const char* value = std::getenv("KYTY_LOOP_GUARD");
+		return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 0)) : 0u;
+	}();
+	return limit;
+}
+
+// Counts one iteration; returns a bool that is true once the invocation is over its budget.
+uint32_t EmitLoopGuardTripped(EmitterState& state) {
+	auto&      builder = state.builder;
+	const auto u32     = TypeU32(state);
+	if (state.loop_guard_variable == 0) {
+		const auto zero = ConstantU32(state, 0);
+		state.loop_guard_variable = builder.DefineGlobalVariableInit(
+		    TypePointer(state, spv::StorageClassPrivate, u32), spv::StorageClassPrivate, zero);
+	}
+	const auto count = builder.AllocateId();
+	builder.AddFunction(spv::OpLoad, u32, count, state.loop_guard_variable);
+	const auto next = builder.AllocateId();
+	builder.AddFunction(spv::OpIAdd, u32, next, count, ConstantU32(state, 1));
+	builder.AddFunction(spv::OpStore, state.loop_guard_variable, next);
+	const auto tripped = builder.AllocateId();
+	builder.AddFunction(spv::OpUGreaterThan, TypeBool(state), tripped, next,
+	                    ConstantU32(state, LoopGuardLimit()));
+	return tripped;
+}
+
+// A loop's back edge (latch to header) or its header's exit test, guarded so that a tripped
+// budget takes the existing exit edge.
+uint32_t GuardLoopCondition(ValueEmitContext& ctx, const IR::Block* block, uint32_t condition) {
+	if (LoopGuardLimit() == 0) return condition;
+	const auto& term = block->terminator;
+	const auto  is_back_edge = [&](const IR::Block* target) {
+		return target != nullptr && target->terminator.loop_header &&
+		       target->terminator.continue_block == block;
+	};
+	int stay = 0; // +1: the true target keeps looping; -1: the false target does.
+	if (is_back_edge(term.true_block) && !is_back_edge(term.false_block)) {
+		stay = 1;
+	} else if (is_back_edge(term.false_block) && !is_back_edge(term.true_block)) {
+		stay = -1;
+	} else if (term.loop_header && term.merge_block != nullptr) {
+		if (term.false_block == term.merge_block && term.true_block != term.merge_block) {
+			stay = 1;
+		} else if (term.true_block == term.merge_block && term.false_block != term.merge_block) {
+			stay = -1;
+		}
+	}
+	if (stay == 0) return condition;
+	auto&      state   = ctx.state;
+	const auto tripped = EmitLoopGuardTripped(state);
+	const auto guarded = state.builder.AllocateId();
+	if (stay > 0) {
+		const auto keep = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLogicalNot, TypeBool(state), keep, tripped);
+		state.builder.AddFunction(spv::OpLogicalAnd, TypeBool(state), guarded, condition, keep);
+	} else {
+		state.builder.AddFunction(spv::OpLogicalOr, TypeBool(state), guarded, condition, tripped);
+	}
+	return guarded;
+}
+
 void EmitStructuredTerminator(ValueEmitContext& ctx, const IR::Block* block) {
 	const auto& term       = block->terminator;
 	const auto  emit_merge = [&]() {
@@ -130,7 +197,7 @@ void EmitStructuredTerminator(ValueEmitContext& ctx, const IR::Block* block) {
 				EmitReturn(ctx);
 				return;
 			}
-			const auto condition = ctx.Def(block->condition);
+			const auto condition = GuardLoopCondition(ctx, block, ctx.Def(block->condition));
 			emit_merge();
 			ctx.state.builder.AddFunction(spv::OpBranchConditional, condition,
 			                              true_block->Definition(), false_block->Definition());
