@@ -4376,8 +4376,12 @@ private:
 				source = buffer != BufferAccess::Read ? CarriedBufferSource(*handle) : UINT32_MAX;
 				if (source == UINT32_MAX) {
 					Fail(flags.pc,
-					     "buffer descriptor is not a valid runtime value; GPU-selected access "
-					     "requires a scalar, raw 8/16-bit, raw DWORD x1/x2/x3/x4, or formatted X load");
+					     fmt::format("buffer descriptor is not a valid runtime value; GPU-selected "
+					                 "access requires a scalar, raw 8/16-bit, raw DWORD x1/x2/x3/x4, "
+					                 "or formatted X load (here: {} kind={} bits={} formatted={} "
+					                 "typed={})",
+					                 ValueOpcodeName(op), static_cast<int>(memory.kind),
+					                 memory.data_bits, memory.formatted ? 1 : 0, memory.typed ? 1 : 0));
 				}
 			}
 			resource = AddBuffer(source, memory, op, flags.pc);

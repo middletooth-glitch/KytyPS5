@@ -29,6 +29,8 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <unordered_set>
+#include <mutex>
 #include <array>
 #include <atomic>
 #include <cctype>
@@ -380,11 +382,20 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	// incompatible texture types).
 	const auto drop = [&] {
 		input_info.stage = {};
-		static std::atomic<uint32_t> logged {0};
-		if (logged.fetch_add(1, std::memory_order_relaxed) < 32u) {
-			LOGF("GetProgram: dropping a %s call of shader hash=0x%016" PRIx64
-			     ": its resources cannot be specialized\n",
-			     ShaderRecompiler::StageName(options.stage), params.hash);
+		// Once per shader and failing check (ResourceMaterialization.cpp line), so every
+		// dropped shader shows up with the reason.
+		static std::mutex                   logged_mutex;
+		static std::unordered_set<uint64_t> logged;
+		const uint32_t line = ShaderRecompiler::IR::g_materialize_fail_line;
+		bool           first = false;
+		{
+			std::lock_guard lock(logged_mutex);
+			first = logged.insert(params.hash ^ (uint64_t {line} << 48u)).second;
+		}
+		if (first) {
+			LOGF("GetProgram: dropping %s calls of shader hash=0x%016" PRIx64
+			     ": its resources cannot be specialized (ResourceMaterialization.cpp:%u)\n",
+			     ShaderRecompiler::StageName(options.stage), params.hash, line);
 		}
 		return nullptr;
 	};

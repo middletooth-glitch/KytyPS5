@@ -18,6 +18,16 @@
 #include <unordered_set>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
+
+// The source line of the check that made MaterializeResources fail last on this thread, for
+// the "cannot be specialized" drop message.
+thread_local uint32_t g_materialize_fail_line = 0;
+#define KYTY_MAT_FAIL()                                                                            \
+	do {                                                                                           \
+		g_materialize_fail_line = __LINE__;                                                        \
+		return false;                                                                              \
+	} while (false)
+
 namespace {
 
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
@@ -28,7 +38,7 @@ bool SpecializationFail(std::string_view message) {
 		std::fprintf(stderr, "shader resource specialization failed: %.*s\n",
 		             static_cast<int>(message.size()), message.data());
 	}
-	return false;
+	KYTY_MAT_FAIL();
 }
 
 Decoder::ImageDimension DescriptorDimension(const DescriptorValue&  descriptor,
@@ -68,9 +78,9 @@ bool NullImageDescriptor(const DescriptorValue& descriptor) {
 bool NullBufferDescriptor(Value value) {
 	const auto* handle = value.Resolve().TryInstruction();
 	if (handle == nullptr || handle->GetOpcode() != ValueOpcode::GetBufferResource ||
-	    handle->NumArgs() != 4u) return false;
+	    handle->NumArgs() != 4u) KYTY_MAT_FAIL();
 	for (size_t index = 0; index < 4u; ++index)
-		if (handle->Arg(index).Resolve() != Value(0u)) return false;
+		if (handle->Arg(index).Resolve() != Value(0u)) KYTY_MAT_FAIL();
 	return true;
 }
 
@@ -80,25 +90,25 @@ bool ValidImageDescriptor(const DescriptorValue& descriptor, bool r128 = false) 
 	if ((words[1] & 0x20000000u) != 0u || (words[2] & 0x70003000u) != 0u ||
 	    (!r128 && ((words[4] & 0xe000e000u) != 0u || (words[5] & 0xf9000000u) != 0u ||
 	               (words[6] & 0x00007b00u) != 0u))) {
-		return false;
+		KYTY_MAT_FAIL();
 	}
 	const auto type   = static_cast<Prospero::ImageType>((descriptor.dwords[3] >> 28u) & 0xfu);
 	const auto format = static_cast<Prospero::BufferFormat>((descriptor.dwords[1] >> 20u) & 0x1ffu);
 	if (type < Prospero::ImageType::kColor1D || format == Prospero::BufferFormat::kInvalid ||
 	    format > Prospero::BufferFormat::kBc7Srgb) {
-		return false;
+		KYTY_MAT_FAIL();
 	}
 	if (r128 && type != Prospero::ImageType::kColor1D && type != Prospero::ImageType::kColor2D &&
 	    type != Prospero::ImageType::kColor2DMsaa) {
-		return false;
+		KYTY_MAT_FAIL();
 	}
-	if (!IsValidImageSwizzle(words[3] & 0xfffu)) return false;
+	if (!IsValidImageSwizzle(words[3] & 0xfffu)) KYTY_MAT_FAIL();
 	const bool array = type == Prospero::ImageType::kColor1DArray ||
 	                   type == Prospero::ImageType::kColor2DArray ||
 	                   type == Prospero::ImageType::kColor2DMsaaArray ||
 	                   type == Prospero::ImageType::kCube;
 	if (array && ((words[4] >> 16u) & 0x1fffu) > (words[4] & 0x1fffu)) {
-		return false;
+		KYTY_MAT_FAIL();
 	}
 	const auto base_level = (words[3] >> 12u) & 0xfu;
 	const auto last_level = (words[3] >> 16u) & 0xfu;
@@ -188,7 +198,7 @@ uint32_t ImageMipCount(const ImageResource& image, const DescriptorValue& descri
 
 bool DecodeBufferDescriptor(const DescriptorValue& descriptor, ShaderBufferResource& result) {
 	if (descriptor.dword_count != std::size(result.fields)) {
-		return false;
+		KYTY_MAT_FAIL();
 	}
 	std::copy_n(descriptor.dwords.begin(), std::size(result.fields), result.fields);
 	return true;
@@ -209,7 +219,7 @@ bool ReadTable(uint64_t base, uint64_t size, uint64_t offset,
 		return true;
 	}
 	if (base > AddressMask || offset > AddressMask - base) {
-		return false;
+		KYTY_MAT_FAIL();
 	}
 	const auto address = base + offset;
 	const auto prefix = words.first(count);
@@ -225,7 +235,7 @@ bool ReadScalarTable(uint64_t base, uint64_t size, uint64_t offset,
 
 bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferResource& resource) {
 	ShaderBufferResource descriptor;
-	if (!DecodeBufferDescriptor(value, descriptor)) return false;
+	if (!DecodeBufferDescriptor(value, descriptor)) KYTY_MAT_FAIL();
 	const bool formatted_read = resource.formatted && resource.read && !resource.written;
 	if (descriptor.Type() != 0u || descriptor.Format() == Prospero::BufferFormat::kInvalid ||
 	    (!formatted_read && (descriptor.Base48() == 0u || descriptor.GetSize() == 0u))) {
@@ -285,7 +295,7 @@ bool IsBoundedDescriptorTable(const ResourcePlan& program,
 
 bool CanReadIndexedSelector(const ShaderBufferResource& material, uint32_t offset) {
 	if (material.Type() != 0u || material.SwizzleEnabled() || material.AddTid() ||
-	    material.OutOfBounds() != 0u) return false;
+	    material.OutOfBounds() != 0u) KYTY_MAT_FAIL();
 	if (material.Format() == Prospero::BufferFormat::kInvalid || material.NumRecords() == 0u ||
 	    offset >= material.Stride()) return true;
 	return material.Base48() != 0u &&
@@ -298,12 +308,12 @@ bool CanReadIndexedSelector(const ShaderBufferResource& material, uint32_t offse
 bool EvaluateIndirectCount(const ResourcePlan& program, const DescriptorSource::IndirectDescriptor& indirect,
                            const SrtRuntime& runtime, uint32_t& count) {
 	if (indirect.workgroup_axis != UINT32_MAX) {
-		if (runtime.workgroup_counts.size() != 3u || indirect.workgroup_axis >= 3u) return false;
+		if (runtime.workgroup_counts.size() != 3u || indirect.workgroup_axis >= 3u) KYTY_MAT_FAIL();
 		count = std::ranges::find(runtime.workgroup_counts, 0u) != runtime.workgroup_counts.end()
 		    ? 0u : runtime.workgroup_counts[indirect.workgroup_axis];
 		return true;
 	}
-	if (!WalkedValue(program, indirect.key_count, count)) return false;
+	if (!WalkedValue(program, indirect.key_count, count)) KYTY_MAT_FAIL();
 	if (indirect.signed_count && std::bit_cast<int32_t>(count) < 0) count = 0;
 	return true;
 }
@@ -325,7 +335,7 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 		if (step == 4u) {
 			return read_selector(base, size, first, keys);
 		}
-		if (step < 4u) return false;
+		if (step < 4u) KYTY_MAT_FAIL();
 		for (uint64_t copied = 0; copied < count;) {
 			const auto offset = first + copied * step;
 			// Scalar reads align each strided offset independently.
@@ -336,7 +346,7 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 			const auto batch = std::span(keys).subspan(count);
 			if (!read_selector(base, size, offset, batch)) {
 				keys.resize(count);
-				return false;
+				KYTY_MAT_FAIL();
 			}
 			for (uint64_t index = 0; index < length; ++index)
 				keys[copied + index] = batch[(bias + index * step) / 4u];
@@ -352,7 +362,7 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 		for (; ranks != 0u; ranks &= ranks - 1u) {
 			const auto offset = first + std::countr_zero(ranks) * step;
 			uint32_t key = 0;
-			if (offset > UINT32_MAX || !read_selector(base, size, offset, {&key, 1})) return false;
+			if (offset > UINT32_MAX || !read_selector(base, size, offset, {&key, 1})) KYTY_MAT_FAIL();
 			keys.push_back(key);
 		}
 		return true;
@@ -365,15 +375,15 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 		    !DecodeBufferDescriptor(count_value, counts) ||
 		    !DecodeBufferDescriptor(material_value, material) || selector->stride != 4u ||
 		    selector->offset != 0u || rows.stride == 0u || (rows.stride & 3u) != 0u ||
-		    counts.GetSize() / 4u > MaxIndirectDescriptorProbes) return false;
+		    counts.GetSize() / 4u > MaxIndirectDescriptorProbes) KYTY_MAT_FAIL();
 		std::vector<uint32_t> lengths(counts.GetSize() / 4u);
-		if (!ReadScalarTable(counts.Base48(), counts.GetSize(), 0u, runtime, lengths)) return false;
+		if (!ReadScalarTable(counts.Base48(), counts.GetSize(), 0u, runtime, lengths)) KYTY_MAT_FAIL();
 		uint32_t total = 0;
 		for (size_t row = 0; row < lengths.size(); ++row) {
 			const auto length = lengths[row];
 			if (length > MaxIndirectDescriptorProbes - total ||
 			    (length != 0u && uint64_t {row} * rows.stride + uint64_t {length} * 4u >
-			                         UINT32_MAX + 1ull)) return false;
+			                         UINT32_MAX + 1ull)) KYTY_MAT_FAIL();
 			total += length;
 		}
 		keys.reserve(total);
@@ -394,7 +404,7 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 			// reader captures the entire fetched span for writable-alias rejection.
 			batch.resize(end - first);
 			if (!ReadScalarTable(material.Base48(), material.GetSize(), first * 4u, runtime, batch))
-				return false;
+				KYTY_MAT_FAIL();
 			for (; row < next; ++row) {
 				if (lengths[row] == 0u) continue;
 				const auto begin = batch.begin() + (uint64_t {row} * rows.stride / 4u - first);
@@ -413,7 +423,7 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 		    selector->stride != masks.size_bytes() || selector->offset != 0u ||
 		    material.Type() != 0u || material.Stride() != selector->stride ||
 		    material.SwizzleEnabled() || material.AddTid() || material.OutOfBounds() != 0u ||
-		    (material.Base48() & 3u) != 0u) return false;
+		    (material.Base48() & 3u) != 0u) KYTY_MAT_FAIL();
 		if (material.Format() != Prospero::BufferFormat::kInvalid) {
 			const auto words = material.GetSize() / sizeof(uint32_t);
 			// Bitmap storage can grow with resolution while its candidate domain stays at 32 keys
@@ -421,7 +431,7 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 			for (uint64_t first_word = 0; first_word < words; first_word += keys.size()) {
 				keys.resize(std::min<uint64_t>(words - first_word, MaxIndirectDescriptorProbes));
 				if (!ReadScalarTable(material.Base48(), material.GetSize(), first_word * 4u,
-				                     runtime, keys)) return false;
+				                     runtime, keys)) KYTY_MAT_FAIL();
 				for (size_t word = 0; word < keys.size(); ++word) masks[word % masks.size()] |= keys[word];
 				if (std::ranges::all_of(masks, [](uint32_t mask) { return mask == UINT32_MAX; })) break;
 			}
@@ -436,13 +446,13 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 			}
 		}
 	} else if (!selector->byte_ranges.empty()) {
-		if (material_value.dword_count != 2u) return false;
+		if (material_value.dword_count != 2u) KYTY_MAT_FAIL();
 		const auto base = (uint64_t {material_value.dwords[1]} << 32u) | material_value.dwords[0];
 		std::array<bool, 256> selected {};
 		for (const auto [offset, size]: selector->byte_ranges) {
-			if (size > MaxIndirectDescriptorProbes || ((offset | size) & 3u) != 0u) return false;
+			if (size > MaxIndirectDescriptorProbes || ((offset | size) & 3u) != 0u) KYTY_MAT_FAIL();
 			keys.resize(size / 4u);
-			if (!ReadScalarTable(base, UINT64_MAX, offset, runtime, keys)) return false;
+			if (!ReadScalarTable(base, UINT64_MAX, offset, runtime, keys)) KYTY_MAT_FAIL();
 			for (const auto word: keys)
 				for (uint32_t shift = 0; shift < 32u; shift += 8u)
 					selected[(word >> shift) & 255u] = true;
@@ -455,27 +465,27 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 		uint64_t             base = 0, size = UINT64_MAX;
 		uint32_t             first = 0, count = 0;
 		if (material_value.dword_count == 2u) {
-			if (selector->stride == 0u) return false;
+			if (selector->stride == 0u) KYTY_MAT_FAIL();
 			base = (uint64_t {material_value.dwords[1]} << 32u) | material_value.dwords[0];
 		} else {
-			if (!DecodeBufferDescriptor(material_value, material)) return false;
+			if (!DecodeBufferDescriptor(material_value, material)) KYTY_MAT_FAIL();
 			base = material.Base48();
 			size = material.GetSize();
 		}
 		if (!WalkedValue(program, indirect.selector_first, first) ||
 		    !EvaluateIndirectCount(program, indirect, runtime, count) || count > MaxIndirectDescriptorProbes)
-			return false;
+			KYTY_MAT_FAIL();
 		// SMEM uses its instruction's byte stride; V# stride only supplies its bounds.
 		const auto step = selector->stride != 0u ? selector->stride : material.Stride();
 		if (selector->stride == 0u &&
 		    (material.Type() != 0u || material.SwizzleEnabled() || material.AddTid() ||
 		     material.OutOfBounds() != 0u || uint64_t {selector->offset} + 4u > step ||
-		     uint64_t {first} + count > material.NumRecords())) return false;
+		     uint64_t {first} + count > material.NumRecords())) KYTY_MAT_FAIL();
 		const auto last = count != 0u ? uint64_t {first} + count - 1u : 0u;
-		if (last > UINT32_MAX) return false;
+		if (last > UINT32_MAX) KYTY_MAT_FAIL();
 		// Out-of-bounds scalar reads return zero.
 		const auto end = count != 0u ? last * step + selector->offset + 4u : 0u;
-		if (end > uint64_t {UINT32_MAX} + 1u) return false;
+		if (end > uint64_t {UINT32_MAX} + 1u) KYTY_MAT_FAIL();
 		const auto start = uint64_t {first} * step + selector->offset;
 		if (selector->ranks) {
 			// A scan selects the ranks some word of its mask's address class sets.
@@ -483,7 +493,7 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 			DescriptorValue mask_value;
 			ShaderBufferResource masks;
 			if (count > 32u || !WalkedDescriptor(program, mask.source, mask_value) ||
-			    !DecodeBufferDescriptor(mask_value, masks)) return false;
+			    !DecodeBufferDescriptor(mask_value, masks)) KYTY_MAT_FAIL();
 			// Each chunk holds whole strides of the power-of-two class, or one of its words.
 			const auto words = mask.stride / 4u;
 			const auto chunk =
@@ -493,14 +503,14 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 			     at += uint64_t {std::max(chunk, words)} * 4u) {
 				keys.resize(std::min<uint64_t>((masks.GetSize() - at) / 4u, chunk));
 				if (!ReadScalarTable(masks.Base48(), masks.GetSize(), at, runtime, keys))
-					return false;
+					KYTY_MAT_FAIL();
 				for (size_t word = 0; word < keys.size(); word += words) ranks |= keys[word];
 			}
 			keys.clear();
 			if (count < 32u) ranks &= (1u << count) - 1u;
-			if (!read_ranks(base, size, start, step, ranks)) return false;
+			if (!read_ranks(base, size, start, step, ranks)) KYTY_MAT_FAIL();
 		} else if (!read_keys(base, size, start, step, count)) {
-			return false;
+			KYTY_MAT_FAIL();
 		}
 	} else if (!indirect.selector_mask.IsEmpty()) {
 		uint32_t mask = 0;
@@ -508,30 +518,30 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 		if (material_value.dword_count != 2u ||
 		    !WalkedValue(program, indirect.selector_mask, mask) ||
 		    !EvaluateIndirectCount(program, indirect, runtime, count) || count == 0u || count > 32u) {
-			return false;
+			KYTY_MAT_FAIL();
 		}
 		if (count < 32u) mask &= (1u << count) - 1u;
 		const auto material_base =
 		    (static_cast<uint64_t>(material_value.dwords[1]) << 32u) | material_value.dwords[0];
 		if (!read_ranks(material_base, UINT64_MAX, selector->offset, selector->stride, mask))
-			return false;
+			KYTY_MAT_FAIL();
 	} else if (selector->stride == 0u) {
 		ShaderBufferResource material;
 		if (!DecodeBufferDescriptor(material_value, material) ||
-		    !CanReadIndexedSelector(material, selector->offset)) return false;
+		    !CanReadIndexedSelector(material, selector->offset)) KYTY_MAT_FAIL();
 		const auto records = material.NumRecords();
 		if (material.Format() != Prospero::BufferFormat::kInvalid && records > selector->first_record &&
 		    selector->offset < material.Stride() &&
 		    !read_keys(material.Base48(), material.GetSize(),
 		               uint64_t {selector->first_record} * material.Stride() + selector->offset,
 		               uint64_t {selector->record_step} * material.Stride(),
-		               (records - selector->first_record - 1u) / selector->record_step + 1u)) return false;
+		               (records - selector->first_record - 1u) / selector->record_step + 1u)) KYTY_MAT_FAIL();
 		keys.push_back(0u); // Every out-of-bounds indexed load returns zero.
 	} else {
 		ShaderBufferResource material;
 		if (!DecodeBufferDescriptor(material_value, material) || selector->stride < 4u ||
 		    !std::has_single_bit(selector->stride) || (selector->offset & 3u) != 0u)
-			return false;
+			KYTY_MAT_FAIL();
 		// Empty selector bounds denote the complete U32 congruence class. SMEM
 		// adds its aligned immediate after the dynamic offset, without U32 wrap.
 		const auto domain_count = (uint64_t {1} << 32u) / selector->stride;
@@ -540,7 +550,7 @@ bool ResolveSelectorKeys(const ResourcePlan& program, const DescriptorSource::In
 		const auto count = std::min(domain_count,
 		    available < 4u ? 0u : (available - 4u) / selector->stride + 1u);
 		if (count > MaxIndirectDescriptorProbes ||
-		    !read_keys(material.Base48(), material.GetSize(), selector->offset, selector->stride, count)) return false;
+		    !read_keys(material.Base48(), material.GetSize(), selector->offset, selector->stride, count)) KYTY_MAT_FAIL();
 		if (count < domain_count) keys.push_back(0u); // An out-of-bounds scalar read returns zero.
 	}
 	if (selector->byte_ranges.empty()) {
@@ -625,7 +635,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 		if ((selector != nullptr && (byte_keys || !selector_keys->resolved) &&
 		     !WalkedDescriptor(program, selector->source, material_value)) ||
 		    !WalkedDescriptor(program, indirect.table_source, table_value)) {
-			return false;
+			KYTY_MAT_FAIL();
 		}
 		if (table_value.dword_count == 2u) {
 			table_base = (static_cast<uint64_t>(table_value.dwords[1]) << 32u) | table_value.dwords[0];
@@ -638,13 +648,13 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 			table_base = table.Base48();
 			table_size = table.GetSize();
 		} else {
-			return false;
+			KYTY_MAT_FAIL();
 		}
 		if (byte_keys && table_size > UINT32_MAX) return failed("table geometry");
 		bool use_selector = selector != nullptr;
 		if (byte_keys && selector != nullptr) {
 			ShaderBufferResource material;
-			if (!DecodeBufferDescriptor(material_value, material)) return false;
+			if (!DecodeBufferDescriptor(material_value, material)) KYTY_MAT_FAIL();
 			use_selector = CanReadIndexedSelector(material, selector->offset);
 			if (use_selector && material.Format() != Prospero::BufferFormat::kInvalid &&
 			    material.NumRecords() != 0u && selector->offset < material.Stride()) {
@@ -682,7 +692,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 			                                       : uint64_t {1} << 32u;
 			if (!indirect.key_count.IsEmpty()) {
 				uint32_t key_count = 0u;
-				if (!EvaluateIndirectCount(program, indirect, runtime, key_count)) return false;
+				if (!EvaluateIndirectCount(program, indirect, runtime, key_count)) KYTY_MAT_FAIL();
 				domain = std::min(domain, uint64_t {key_count});
 			}
 			if (indexed_pointer &&
@@ -762,7 +772,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 							    uint64_t {child} * pointer->stride + pointer->offset, descriptor_bytes);
 					} else if (!image_heap) {
 						if (!ReadScalarTable(table_base, table_size, table_offset, runtime,
-						                     std::span(candidate.dwords).first(read_dwords))) return false;
+						                     std::span(candidate.dwords).first(read_dwords))) KYTY_MAT_FAIL();
 					} else {
 						const auto table_word = table_offset / 4u;
 						std::copy_n(heap_words.begin() + table_word,
@@ -795,15 +805,15 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 		if (selector == nullptr) {
 			uint32_t key_count = 0;
 			uint32_t first_key = 0;
-			if (!EvaluateIndirectCount(program, indirect, runtime, key_count)) return false;
+			if (!EvaluateIndirectCount(program, indirect, runtime, key_count)) KYTY_MAT_FAIL();
 			if (!indirect.selector_first.IsEmpty() && !WalkedValue(program, indirect.selector_first, first_key))
-				return false;
+				KYTY_MAT_FAIL();
 			if (indirect.table_stride == 0u || key_count > MaxIndirectDescriptorProbes ||
 			    (indirect.selector_first.IsEmpty() && key_count != 0u &&
 			         uint64_t {indirect.table_offset} + indirect.table_immediate +
 			         uint64_t {key_count - 1u} * indirect.table_stride + descriptor_bytes >
 			             UINT32_MAX + 1ull)) {
-				return false;
+				KYTY_MAT_FAIL();
 			}
 			keys.resize(key_count);
 			std::iota(keys.begin(), keys.end(), first_key);
@@ -816,9 +826,9 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 				keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
 			}
 		} else {
-			if (!indirect.selector_mask.IsEmpty() && table_value.dword_count != 2u) return false;
+			if (!indirect.selector_mask.IsEmpty() && table_value.dword_count != 2u) KYTY_MAT_FAIL();
 			if (!selector_keys->resolved) {
-				if (!ResolveSelectorKeys(program, indirect, material_value, runtime, keys)) return false;
+				if (!ResolveSelectorKeys(program, indirect, material_value, runtime, keys)) KYTY_MAT_FAIL();
 				selector_keys->resolved = true;
 			}
 		}
@@ -858,7 +868,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 				return read_failed("table descriptor read", key, 0u, table_base, table_offset, descriptor_bytes);
 			}
 		} else if (!WalkedDescriptor(program, sources[entry], candidate)) {
-			return false;
+			KYTY_MAT_FAIL();
 		}
 		if (!normalize(candidate))
 			return normalization_failed(table_offset, key, indirect.table_stride, "key");
@@ -1024,7 +1034,7 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			}
 			if (std::ranges::any_of(program.info.sampled_pairs,
 			                       [&](const auto& pair) { return pair.image == i; }) &&
-			    !ValidatePackedUnormSampling(program, snapshot, i)) return false;
+			    !ValidatePackedUnormSampling(program, snapshot, i)) KYTY_MAT_FAIL();
 		}
 		if (storage) {
 			if ((!raw_sint_storage && image.numeric_class == Prospero::TextureNumericClass::Sint) ||
@@ -1186,15 +1196,15 @@ bool BuildSamplerPlan(const ShaderInfo& base, SamplerPlan& plan) {
 	std::vector<uint8_t> usage(base.samplers.size());
 	for (const auto& pair: base.sampled_pairs) {
 		if (pair.image >= base.images.size() || pair.sampler >= base.samplers.size()) {
-			return false;
+			KYTY_MAT_FAIL();
 		}
 		usage[pair.sampler] |= 1u << static_cast<uint32_t>(ClassifySampler(base.images[pair.image]));
 		for (const auto candidate: base.images[pair.image].indirect_resources) {
-			if (candidate >= base.images.size()) return false;
+			if (candidate >= base.images.size()) KYTY_MAT_FAIL();
 			usage[pair.sampler] |= 1u << static_cast<uint32_t>(ClassifySampler(base.images[candidate]));
 		}
 		for (const auto candidate: base.samplers[pair.sampler].indirect_resources) {
-			if (candidate >= base.samplers.size()) return false;
+			if (candidate >= base.samplers.size()) KYTY_MAT_FAIL();
 			usage[candidate] |= usage[pair.sampler];
 		}
 	}
@@ -1295,18 +1305,18 @@ static bool IsFullDispatchPredicate(Value value, uint32_t depth = 0) {
 	value = value.Resolve();
 	if (value == Value(true)) return true;
 	const auto* inst = value.TryInstruction();
-	if (inst == nullptr || depth > 32) return false;
+	if (inst == nullptr || depth > 32) KYTY_MAT_FAIL();
 	if (inst->GetOpcode() == ValueOpcode::LogicalAnd) {
 		return IsFullDispatchPredicate(inst->Arg(0), depth + 1) &&
 		       IsFullDispatchPredicate(inst->Arg(1), depth + 1);
 	}
-	if (inst->GetOpcode() != ValueOpcode::ULessThan32) return false;
+	if (inst->GetOpcode() != ValueOpcode::ULessThan32) KYTY_MAT_FAIL();
 	const auto* global = inst->Arg(0).Resolve().TryInstruction();
 	const auto* extent = inst->Arg(1).Resolve().TryInstruction();
 	if (global == nullptr || global->GetOpcode() != ValueOpcode::GetBuiltin ||
 	    global->Arg(0).Resolve() != Value(static_cast<uint32_t>(StageInputKind::GlobalInvocationId)) ||
 	    extent == nullptr || extent->GetOpcode() != ValueOpcode::GetDispatchThreadExtent)
-		return false;
+		KYTY_MAT_FAIL();
 	const auto axis = global->Arg(1).Resolve();
 	return axis.IsImmediate() && axis.U32() < 3 && extent->Arg(0).Resolve() == axis;
 }
@@ -1425,7 +1435,7 @@ static UniformFillPlan AnalyzeUniformFill(const Program& program) {
 static bool DerivePlanState(ResourcePlan& plan) {
 	for (const auto group: plan.selector_groups) {
 		if (group == plan.selector_keys.size()) plan.selector_keys.emplace_back();
-		if (group != UINT32_MAX && group >= plan.selector_keys.size()) return false;
+		if (group != UINT32_MAX && group >= plan.selector_keys.size()) KYTY_MAT_FAIL();
 	}
 	if (plan.srt_plan_complete && plan.resource_tracking_complete) CompileSrtWalker(plan);
 	return true;
@@ -1619,7 +1629,7 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
 	for (auto& keys: program.selector_keys) keys.resolved = false;
-	if (!program.resource_tracking_complete) return false;
+	if (!program.resource_tracking_complete) KYTY_MAT_FAIL();
 	const auto uses_workgroup_count = [](const DescriptorSource& source) {
 		return source.indirect_descriptor && source.indirect_descriptor->workgroup_axis != UINT32_MAX;
 	};
@@ -1641,7 +1651,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			    !uses_workgroup_count(program.descriptor_sources[source])) continue;
 			if ((runtime.indirect_args_address & 3u) != 0u ||
 			    !ReadTable(runtime.indirect_args_address, sizeof(workgroup_counts), 0u,
-			               observed, workgroup_counts)) return false;
+			               observed, workgroup_counts)) KYTY_MAT_FAIL();
 			observed.workgroup_counts = workgroup_counts;
 			break;
 		}
@@ -1666,7 +1676,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	}
 	const auto evaluate = [&](uint32_t source, DescriptorValue& value) {
 		if (source >= program.descriptor_sources.size()) {
-			return false;
+			KYTY_MAT_FAIL();
 		}
 		if (WalkedActive(program, source)) {
 			return WalkedDescriptor(program, source, value) ||
@@ -1686,11 +1696,11 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	for (uint32_t i = 0; i < snapshot.buffers.size(); ++i) {
 		const auto base_index =
 		    i < program.info.buffers.size() ? i : specialization.buffers[i].indirect_root;
-		if (base_index >= program.info.buffers.size()) return false;
+		if (base_index >= program.info.buffers.size()) KYTY_MAT_FAIL();
 		const auto& base = program.info.buffers[base_index];
 		if (i < program.info.buffers.size()) {
 			const auto* source = Source(program, base.source);
-			if (source == nullptr) return false;
+			if (source == nullptr) KYTY_MAT_FAIL();
 			if (source->indirect_descriptor.has_value()) {
 				snapshot.buffers[i] = {.dword_count = 4u};
 				if (WalkedActive(program, base.source)) {
@@ -1704,7 +1714,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 						return resource_failed("buffer", i, base.source, snapshot.buffers.size());
 				}
 			} else if (!evaluate(base.source, snapshot.buffers[i])) {
-				return false;
+				KYTY_MAT_FAIL();
 			}
 		}
 		auto&                descriptor_value = snapshot.buffers[i];
@@ -1749,7 +1759,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		};
 		const auto* source = Source(program, image.source);
 		if (source == nullptr) {
-			return false;
+			KYTY_MAT_FAIL();
 		}
 		if (source->indirect_descriptor.has_value()) {
 			snapshot.images[i] = {.dword_count = 8u};
@@ -1774,7 +1784,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			}
 		} else {
 			if (!evaluate(image.source, snapshot.images[i])) {
-				return false;
+				KYTY_MAT_FAIL();
 			}
 			// An image listed only by unreached blocks reads zero, not its source's descriptor.
 			if (!WalkedImageActive(program, i) ||
@@ -1788,11 +1798,11 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	for (uint32_t i = 0; i < snapshot.samplers.size(); ++i) {
 		const auto base_index =
 		    i < program.info.samplers.size() ? i : specialization.samplers[i].indirect_root;
-		if (base_index >= program.info.samplers.size()) return false;
+		if (base_index >= program.info.samplers.size()) KYTY_MAT_FAIL();
 		if (i < program.info.samplers.size()) {
 			auto source = program.info.samplers[i].source;
 			const auto* descriptor = Source(program, source);
-			if (descriptor == nullptr) return false;
+			if (descriptor == nullptr) KYTY_MAT_FAIL();
 			const auto* indirect = descriptor->indirect_descriptor ? &*descriptor->indirect_descriptor : nullptr;
 			if (indirect != nullptr && indirect->sources.empty()) {
 				snapshot.samplers[i] = {.dword_count = 4u};
@@ -1803,7 +1813,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 					return resource_failed("sampler", i, source, snapshot.samplers.size());
 			} else {
 				if (indirect != nullptr) source = indirect->sources[0];
-				if (!evaluate(source, snapshot.samplers[i])) return false;
+				if (!evaluate(source, snapshot.samplers[i])) KYTY_MAT_FAIL();
 			}
 		}
 		if (program.info.samplers[base_index].gather_lod) {

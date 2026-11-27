@@ -61,6 +61,9 @@ std::vector<uint8_t> SaveResourcePlan(const ResourcePlan& plan);
 bool                 LoadResourcePlan(std::span<const uint8_t> bytes, ResourcePlan& plan);
 
 // Refreshes cached resources and specialization in place. A failed refresh must not be used.
+// Source line in ResourceMaterialization.cpp of the check that failed last on this thread.
+extern thread_local uint32_t g_materialize_fail_line;
+
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization);
 
