@@ -9,9 +9,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <ranges>
+#include <string>
 #include <xxhash.h>
 #include <zstd.h>
 
@@ -62,13 +64,25 @@ uint64_t BuildStamp() {
 }
 
 // What every record depends on besides its own fields; empty when the build is unknown.
+// Settings read while emitting SPIR-V; stored modules built under other values must not be reused,
+// or a changed KYTY_LOOP_GUARD / KYTY_LOOP_GUARD_HASHES would silently not apply to them.
+uint64_t EmitterSettingsStamp() {
+	uint64_t stamp = 0;
+	for (const char* name: {"KYTY_LOOP_GUARD", "KYTY_LOOP_GUARD_HASHES"}) {
+		const char* value = std::getenv(name);
+		const auto  text  = std::string(name) + "=" + (value != nullptr ? value : "");
+		stamp             = XXH3_64bits_withSeed(text.data(), text.size(), stamp);
+	}
+	return stamp;
+}
+
 std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
 	const auto stamp = BuildStamp();
 	if (stamp == 0) {
 		return {};
 	}
 	Writer header;
-	IoAll(header, stamp, SpirvProfile(graphics),
+	IoAll(header, stamp, EmitterSettingsStamp(), SpirvProfile(graphics),
 	      graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize);
 	return std::move(header.bytes);
 }
