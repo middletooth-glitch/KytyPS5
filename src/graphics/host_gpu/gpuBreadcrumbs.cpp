@@ -16,6 +16,7 @@ struct Record {
 	const char*           kind   = nullptr;
 	uint64_t              hash_a = 0;
 	uint64_t              hash_b = 0;
+	uint64_t              info   = 0;
 };
 
 constexpr uint32_t                  kRingSize = 1u << 16u;
@@ -81,7 +82,8 @@ bool Enabled() {
 	return g_enabled;
 }
 
-uint32_t Begin(vk::CommandBuffer command, const char* kind, uint64_t hash_a, uint64_t hash_b) {
+uint32_t Begin(vk::CommandBuffer command, const char* kind, uint64_t hash_a, uint64_t hash_b,
+               uint64_t info) {
 	if (!g_enabled) return 0;
 	uint32_t sequence = g_next.fetch_add(1, std::memory_order_relaxed) + 1u;
 	if (sequence == 0) sequence = g_next.fetch_add(1, std::memory_order_relaxed) + 1u;
@@ -89,6 +91,7 @@ uint32_t Begin(vk::CommandBuffer command, const char* kind, uint64_t hash_a, uin
 	record.kind   = kind;
 	record.hash_a = hash_a;
 	record.hash_b = hash_b;
+	record.info   = info;
 	record.sequence.store(sequence, std::memory_order_release);
 	g_write(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_buffer, 0, sequence);
 	return sequence;
@@ -113,8 +116,8 @@ void Report() {
 	const auto print = [](uint32_t sequence, const char* note) {
 		const auto& record = g_ring[sequence % kRingSize];
 		if (record.sequence.load(std::memory_order_acquire) != sequence) return;
-		std::printf("  %s #%u %s 0x%016" PRIx64 " 0x%016" PRIx64 "\n", note, sequence,
-		            record.kind != nullptr ? record.kind : "?", record.hash_a, record.hash_b);
+		std::printf("  %s #%u %s 0x%016" PRIx64 " 0x%016" PRIx64 " info=0x%" PRIx64 "\n", note, sequence,
+		            record.kind != nullptr ? record.kind : "?", record.hash_a, record.hash_b, record.info);
 	};
 	for (uint32_t s = finished > 4 ? finished - 4 : 1; s <= finished && s != 0; s++) print(s, "done   ");
 	for (uint32_t s = finished + 1; s <= finished + 12 && s <= recorded; s++) {

@@ -1216,7 +1216,11 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	        : vertex_stages.front().stage.module->info.shader_hash,
 	    state.ps_active && state.ps_input_info.stage.module != nullptr
 	        ? state.ps_input_info.stage.module->info.shader_hash
-	        : 0);
+	        : 0,
+	    // task: 1<<63 | indirect record count; mesh: groups<<32 | instances; else: count<<32 | instances
+	    mesh_task     ? ((uint64_t {1} << 63u) | emit.indirect.count)
+	    : mesh_active ? ((uint64_t {mesh_groups} << 32u) | draw.instance_count)
+	                  : ((uint64_t {draw.index_count} << 32u) | draw.instance_count));
 	if (mesh_task) {
 		vk_buffer.drawMeshTasksEXT(emit.indirect.count, 1, 1);
 	} else if (mesh_active) {

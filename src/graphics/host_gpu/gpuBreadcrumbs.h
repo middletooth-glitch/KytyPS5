@@ -17,7 +17,9 @@ bool Requested();
 void Init(vk::PhysicalDevice physical_device, vk::Device device);
 bool Enabled();
 // Returns the marker sequence to pass to End; 0 when disabled.
-uint32_t Begin(vk::CommandBuffer command, const char* kind, uint64_t hash_a, uint64_t hash_b);
+// info: free-form launch parameters (group counts, instances) printed in hex.
+uint32_t Begin(vk::CommandBuffer command, const char* kind, uint64_t hash_a, uint64_t hash_b,
+               uint64_t info = 0);
 void     End(vk::CommandBuffer command, uint32_t sequence);
 // Prints the work that had started but not finished.
 void Report();
