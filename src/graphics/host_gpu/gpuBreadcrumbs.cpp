@@ -103,6 +103,8 @@ void End(vk::CommandBuffer command, uint32_t sequence) {
 }
 
 void Report() {
+	static std::atomic<bool> reported {false};
+	if (reported.exchange(true)) return;
 	if (!g_enabled) {
 		std::printf("GPU breadcrumbs: off (set KYTY_GPU_BREADCRUMBS=1)\n");
 		std::fflush(stdout);

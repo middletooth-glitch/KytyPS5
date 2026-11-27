@@ -439,6 +439,9 @@ void BufferCache::ReadBackGpuModified(Buffer& buffer, uint64_t vaddr, uint64_t s
 			submit.commandBufferCount = 1;
 			submit.pCommandBuffers    = &m_readback_command;
 			const auto result         = m_graphics.queue.submit(1, &submit, m_readback_fence);
+			if (result == vk::Result::eErrorDeviceLost) {
+				ReportDeviceFault("vkQueueSubmit (readback)");
+			}
 			if (result != vk::Result::eSuccess) {
 				EXIT("vkQueueSubmit (readback) failed: %s\n", vk::to_string(result).c_str());
 			}

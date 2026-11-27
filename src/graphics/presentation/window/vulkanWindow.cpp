@@ -780,6 +780,7 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	SetDeviceFaultReporting(device, device_fault);
 	if (buffer_marker) {
 		GpuBreadcrumbs::Init(physical_device, device);
+		Common::SetFatalDiagnosticHook(+[] { GpuBreadcrumbs::Report(); });
 	}
 	return device;
 }

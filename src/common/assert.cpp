@@ -3,14 +3,24 @@
 #include "common/subsystems.h"
 #include "kytyGitVersion.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <fmt/format.h>
 
 namespace Common {
 
+static std::atomic<void (*)()> g_fatal_hook {nullptr};
+
+void SetFatalDiagnosticHook(void (*hook)()) {
+	g_fatal_hook.store(hook);
+}
+
 [[noreturn]] static void DbgReport(const char* title, std::string_view text, const char* file,
                                    int line) {
+	if (auto* hook = g_fatal_hook.exchange(nullptr); hook != nullptr) {
+		hook();
+	}
 	Log::WriteToConsoleAndLog(fmt::format("--- Build ---\n{}\n{}\n{} in {}:{}\n", KYTY_BUILD_LABEL,
 	                                      title, text, file, line));
 	Subsystems::EmergencyShutdownActive();
