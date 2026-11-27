@@ -1173,7 +1173,28 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 			                                       .primitive_size = params.primitive_size,
 			                                       .group_step     = params.group_step,
 			                                       .max_total      = params.max_total};
-			params.capture     = GpuBreadcrumbs::ReserveMeshCapture(cpu, &capture_tag);
+			GpuBreadcrumbs::MeshCapture cpu_buffers = cpu;
+			const auto add_buffers = [&](const PreparedBindings& prepared, char stage) {
+				for (const auto& source: prepared.buffer_sources) {
+					auto& count = cpu_buffers.buffer_count;
+					if (count < GpuBreadcrumbs::MeshCapture::kMaxBuffers) {
+						cpu_buffers.buffers[count] = {
+						    .address = source.address,
+						    .size    = source.size,
+						    .stage   = stage,
+						    .mapped  = source.size == 0 ||
+						              m_context.IsMapped(source.address, source.size)};
+					}
+					count++;
+				}
+			};
+			for (uint32_t i = 0; i < vertex_stages.size(); i++) {
+				add_buffers(bindings.vertex[i], 'M');
+			}
+			if (state.ps_active) {
+				add_buffers(bindings.pixel, 'P');
+			}
+			params.capture     = GpuBreadcrumbs::ReserveMeshCapture(cpu_buffers, &capture_tag);
 			params.capture_tag = capture_tag;
 		}
 		auto& stream = m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);

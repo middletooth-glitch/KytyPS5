@@ -96,6 +96,16 @@ void PrintMeshCapture(uint32_t tag) {
 	            " index_size=%u index_limit=%u prim_size=%u group_step=%u max_total=%u\n",
 	            cpu.guest_args, cpu.records, cpu.stride, cpu.index_address, cpu.index_size,
 	            cpu.index_limit, cpu.primitive_size, cpu.group_step, cpu.max_total);
+	const uint32_t shown = cpu.buffer_count < MeshCapture::kMaxBuffers ? cpu.buffer_count
+	                                                                    : MeshCapture::kMaxBuffers;
+	for (uint32_t i = 0; i < shown; i++) {
+		const auto& b = cpu.buffers[i];
+		std::printf("      buffer %c%u: 0x%016" PRIx64 " size=0x%" PRIx64 " %s\n", b.stage, i,
+		            b.address, b.size, b.mapped ? "mapped" : "NOT MAPPED");
+	}
+	if (cpu.buffer_count > shown) {
+		std::printf("      (%u more buffers)\n", cpu.buffer_count - shown);
+	}
 	const volatile uint32_t* gpu = g_capture + static_cast<size_t>(slot) * kCaptureSlotDwords;
 	if (gpu[0] != tag) {
 		std::printf("      gpu: task shader had not written its record (slot tag 0x%08x)\n", gpu[0]);

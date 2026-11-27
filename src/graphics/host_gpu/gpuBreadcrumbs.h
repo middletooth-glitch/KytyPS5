@@ -7,6 +7,7 @@
 
 #include "graphics/host_gpu/vulkanCommon.h"
 
+#include <array>
 #include <cstdint>
 
 namespace Libs::Graphics::GpuBreadcrumbs {
@@ -35,6 +36,16 @@ struct MeshCapture {
 	uint32_t primitive_size = 0;
 	uint32_t group_step     = 0;
 	uint32_t max_total      = 0;
+	// The guest buffer ranges the draw's shaders resolved, and whether each is mapped for the GPU.
+	struct Buffer {
+		uint64_t address = 0;
+		uint64_t size    = 0;
+		char     stage   = '?'; // V/M: vertex or mesh stage, P: pixel
+		bool     mapped  = false;
+	};
+	static constexpr uint32_t kMaxBuffers = 16;
+	std::array<Buffer, kMaxBuffers> buffers {};
+	uint32_t                        buffer_count = 0; // all of them, even past kMaxBuffers
 };
 // Reserves a capture slot for one indirect mesh draw. Returns the device address the task shader
 // writes the record it read to (0 when disabled); *tag identifies the slot's use and goes into the

@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <atomic>
 #include <cinttypes>
+#include <cstdlib>
 #include "graphics/host_gpu/renderer/trace3d.h"
 #include "common/common.h"
 #include "common/profiler.h"
@@ -441,6 +442,15 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	pipeline_info.pColorBlendState    = &color_blending;
 	pipeline_info.pDynamicState       = &dynamic_state;
 	pipeline_info.layout              = pipeline.pipeline_layout;
+	// KYTY_MESH_NOOPT=1 (diagnostic): build mesh pipelines without driver optimization, to tell an
+	// AMD shader-compiler miscompile from an emulation bug when GTA VI's mesh draws hang the GPU.
+	static const bool mesh_no_optimization = [] {
+		const char* value = std::getenv("KYTY_MESH_NOOPT");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (mesh && mesh_no_optimization) {
+		pipeline_info.flags |= vk::PipelineCreateFlagBits::eDisableOptimization;
+	}
 
 	TRACE3D("graphics pipeline begin\n");
 	const PipelineCompileScope compile_scope("graphics",
