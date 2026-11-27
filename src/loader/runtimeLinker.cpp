@@ -56,6 +56,12 @@
 #endif
 #endif
 
+
+namespace Libs::Graphics {
+// Defined in graphics/host_gpu/renderer/pipeline/shaders.cpp.
+void PrintCurrentPipelineCompile();
+} // namespace Libs::Graphics
+
 namespace Libs::LibKernel {
 void SetProgName(const std::string& name);
 } // namespace Libs::LibKernel
@@ -772,10 +778,6 @@ static void DumpAllThreads() {
 }
 #endif
 
-namespace Libs::Graphics {
-void PrintCurrentPipelineCompile();
-} // namespace Libs::Graphics
-
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
@@ -916,7 +918,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		}
 		std::fflush(stdout);
 	}
-	Libs::Graphics::PrintCurrentPipelineCompile();
+	::Libs::Graphics::PrintCurrentPipelineCompile();
 	if (const char* v = std::getenv("KYTY_DUMP_THREADS"); v == nullptr || v[0] != '0') {
 		DumpAllThreads();
 		Libs::LibKernel::Semaphore::DumpBlockedSemaphores();
