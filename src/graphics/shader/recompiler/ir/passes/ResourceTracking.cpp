@@ -4081,11 +4081,20 @@ private:
 		return true;
 	}
 
+	// KYTY_SAMPLER_FALLBACK=2 also covers S#s assembled from mixed or computed values.
+	static bool SamplerFallbackAny() {
+		static const bool enabled = [] {
+			const char* v = std::getenv("KYTY_SAMPLER_FALLBACK");
+			return v != nullptr && v[0] == '2';
+		}();
+		return enabled;
+	}
+
 	static bool SamplerFallbackEnabled() {
 		static const bool enabled = [] {
 			// Opt-in (set by the GTA VI launcher): the strict default keeps malformed S#s fatal.
 			const char* v = std::getenv("KYTY_SAMPLER_FALLBACK");
-			return v != nullptr && v[0] == '1';
+			return v != nullptr && (v[0] == '1' || v[0] == '2');
 		}();
 		return enabled;
 	}
@@ -4107,7 +4116,7 @@ private:
 				return false;
 			}
 			if (expected == ValueOpcode::GetSamplerResource && SamplerFallbackEnabled() &&
-			    SamplerWordsAreMemoryReads(*handle)) {
+			    (SamplerWordsAreMemoryReads(*handle) || SamplerFallbackAny())) {
 				// A sampler picked by a GPU-computed index into a sampler table (GTA VI's UI
 				// shaders) cannot be bound as a Vulkan sampler. Rather than abort the whole
 				// emulator, sample with a fixed bilinear clamp-to-edge S#; the texture itself is
