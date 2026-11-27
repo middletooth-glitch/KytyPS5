@@ -25,6 +25,9 @@
 #include <xxhash.h>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
+
+thread_local std::jmp_buf* g_resource_tracking_soft_fail = nullptr;
+thread_local std::string   g_resource_tracking_soft_fail_message;
 namespace {
 
 constexpr uint32_t SamplerBorderClampMask    = (1u << 2u) | (1u << 5u) | (1u << 8u);
@@ -645,6 +648,11 @@ private:
 		const auto message =
 		    fmt::format("shader resource tracking: hash=0x{:016x} stage={} pc=0x{:08x} {}",
 		                m_program.shader_hash, StageName(m_program.stage), pc, reason);
+		if (auto* soft = g_resource_tracking_soft_fail; soft != nullptr) {
+			g_resource_tracking_soft_fail         = nullptr;
+			g_resource_tracking_soft_fail_message = message;
+			std::longjmp(*soft, 1);
+		}
 		EXIT("%s", message.c_str());
 		std::abort();
 	}

@@ -24,6 +24,10 @@
 #include "loader/systemContent.h"
 #include "graphics/host_gpu/renderer/waitProfile.h"
 
+#include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
+#include <csetjmp>
+#include <cstdio>
+#include <cstring>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -422,6 +426,27 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	}
 	auto* current = entry == m_program_cache.end() ? &source : entry->second.call_source.get();
 	ShaderRecompiler::TranslateResult translated;
+	// KYTY_SKIP_UNSUPPORTED_SHADERS=1: a shader whose resources the tracker cannot resolve has
+	// its calls dropped (rendering is incomplete) instead of stopping the emulator.
+	static const bool skip_unsupported = [] {
+		const char* value = std::getenv("KYTY_SKIP_UNSUPPORTED_SHADERS");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	std::jmp_buf soft_fail;
+	if (skip_unsupported) {
+		if (setjmp(soft_fail) != 0) {
+			ShaderRecompiler::IR::g_resource_tracking_soft_fail = nullptr;
+			const auto& message = ShaderRecompiler::IR::g_resource_tracking_soft_fail_message;
+			std::printf("!!! SHADER SKIPPED !!! %s\n", message.c_str());
+			PipelineCacheLog("!!! SHADER SKIPPED !!! {}", message);
+			m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
+			return nullptr;
+		}
+		ShaderRecompiler::IR::g_resource_tracking_soft_fail = &soft_fail;
+	}
+	struct SoftFailScope {
+		~SoftFailScope() { ShaderRecompiler::IR::g_resource_tracking_soft_fail = nullptr; }
+	} soft_fail_scope;
 	if (current != nullptr) {
 		if (!current->calls.empty()) {
 			if (entry == m_program_cache.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);
@@ -433,6 +458,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	} else {
 		translated = ShaderRecompiler::TranslateProgram(params.code, options);
 	}
+	ShaderRecompiler::IR::g_resource_tracking_soft_fail = nullptr;
 	if (entry == m_program_cache.end()) {
 		auto retained = !source.calls.empty()
 		                    ? std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source))
